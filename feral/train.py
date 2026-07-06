@@ -30,14 +30,15 @@ warnings.filterwarnings(
     module="sklearn.metrics._ranking"
 )
 
+# force pytorch to use flash-attention kernel for scaled dot product attention
 torch.backends.cuda.enable_math_sdp(False)
-torch.backends.cuda.enable_mem_efficient_sdp(False)
+torch.backends.cuda.enable_mem_efficient_sdp(False) 
 
 def _str_now():
     """Return the current local time as a filename-safe 'YYYY-MM-DD_HH-MM-SS' string."""
     return datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
 
-
+# raster plots to visualize per-frame predictions vs. ground truth over time
 def _add_raster_logs(logs, predictions, labels_json, partition, prefix, optimal_prefix, multilabel_threshold):
     """
     Adds raster image entries to `logs` under `{prefix}/raster_plot` (regular
@@ -65,25 +66,26 @@ def _add_raster_logs(logs, predictions, labels_json, partition, prefix, optimal_
     except Exception:
         logger.exception("optimal raster plot failed for %s", optimal_prefix)
 
+
 def main(cfg):
     """Run the full training/eval/inference pipeline for one config: build data, model,
     and training objects, train with per-epoch validation and best-checkpoint selection
     (with optional EMA and early stopping), then load the best checkpoint to run test
     and/or inference. Logs metrics and raster plots to wandb and writes answers/checkpoints
     to disk. Returns None."""
-    check_environment(compile_enabled=cfg['training']['compile'])
+    check_environment(compile_enabled=cfg['training']['compile']) # checks that the environment is properly configured
 
-    with open(cfg['data']['label_json'], 'r') as f:
+    with open(cfg['data']['label_json'], 'r') as f: # defines class names - determines is the task is multiclass or multilabel
         labels_json = json.load(f)
 
     validate_labels_json(labels_json, cfg['data'].get('prefix'))
 
-    class_names = {int(x): y for x, y in labels_json['class_names'].items()}
+    class_names = {int(x): y for x, y in labels_json['class_names'].items()} # dict
     num_classes = len(class_names)
     # Per-frame smoothing applied to ensembled probabilities at val/test/inference
     # (None = off). chunk overlap for those partitions is handled in data.py via
     # eval_chunk_shift.
-    eval_smoothing = cfg['data'].get('eval_smoothing_window')
+    eval_smoothing = cfg['data'].get('eval_smoothing_window') # optional - reduces frame-to-frame noise
     model_save_metadata = {
         'class_names': class_names,
         'is_multilabel': labels_json['is_multilabel'],
@@ -114,6 +116,9 @@ def main(cfg):
     inference_loader = loaders.get('inference')
 
     device = torch.device(cfg.get('device', 'cuda'))
+
+    # not all train/val/test/inference splits have to be present
+    # only builds model & optimizer if train loader is present - script doubles as training & eval/inference script
 
     if train_loader is not None:
         model, model_ema = build_model(cfg, num_classes, device)

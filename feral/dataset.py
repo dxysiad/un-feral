@@ -247,6 +247,7 @@ class ClsDataset():
 
     def __getitem__(self, index):
         """Return the chunk at ``index``, retrying up to 3 random indices on failure."""
+        # TODO: Two videos w/ one augmented + another section/video
         try:
             return self.get_item_simple(index)
         except Exception:

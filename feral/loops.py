@@ -37,6 +37,7 @@ def _global_grad_norm(parameters, norm_type=2.0):
 
 
 def _per_element_loss(output, target, is_multilabel):
+    # TODO: Contrastive loss
     """Unreduced per-sample loss (for the heavy 'loss distribution' histogram).
 
     Mirrors the training criterion but with reduction='none'; weights and label

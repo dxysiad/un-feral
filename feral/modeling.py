@@ -101,6 +101,7 @@ def load_model_from_checkpoint(cfg, device, checkpoint_path, num_classes=None):
 
 
 def build_training_objects(cfg, model, train_dataset, train_loader, labels_json, device):
+    # TODO: Contrastive loss
     """Build criterion, optimizer, lr_scheduler, mixup. Returns dict-of-objects."""
     class_weights = get_weights(
         train_dataset.json_data, cfg['model']['class_weights'], device,

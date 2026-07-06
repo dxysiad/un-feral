@@ -72,6 +72,8 @@ def calc_frame_level_map(predictions, labels_json, partition):
         res[f'ap_{cls_name}'] = ap 
     return sum(aps) / len(aps)
 
+# TODO: Change metrics (no F1)
+
 def calculate_f1_metrics(predictions, labels_json, partition, is_multilabel, prefix, multilabel_threshold):
     """Compute precision/recall/F1/accuracy (plus per-class F1) for non-'other' classes.
 
