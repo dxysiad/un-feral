@@ -339,7 +339,9 @@ def validate_labels_json(labels_json, video_folder):
 
     # --- splits ---
     splits = labels_json.get('splits', {})
-    valid_partitions = {'train', 'val', 'test', 'inference'}
+    valid_partitions = {'train', 'val', 'test', 'inference', 'contrastive'}
+    # partitions whose videos are used without per-frame labels
+    unlabeled_partitions = {'inference', 'contrastive'}
     unknown = set(splits.keys()) - valid_partitions
     if unknown:
         errors.append(f"Unknown split names: {unknown}. Allowed: {valid_partitions}")
@@ -349,7 +351,7 @@ def validate_labels_json(labels_json, video_folder):
             errors.append(f"Split '{partition}' must be a list, got {type(videos).__name__}")
             continue
         for vid in videos:
-            if vid not in labels and partition != 'inference':
+            if vid not in labels and partition not in unlabeled_partitions:
                 errors.append(f"Split '{partition}' references '{vid}' which has no entry in 'labels'")
 
     # --- frame count vs. video files ---

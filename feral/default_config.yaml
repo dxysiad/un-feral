@@ -32,6 +32,10 @@ training:
   grad_clip_norm: null     # global grad-norm clip (null = off; e.g. 1.0 to stabilize rare-class runs)
   log_grad_norm: true      # log global grad-norm every step even when not clipping (cheap)
   heavy_log_every: null    # if set (e.g. 200), every N steps log per-layer grad/weight-norm + per-element loss histograms
+  contrastive_num_samples: 10000
+  contrastive_epochs: 0        # 0 = off; >0 runs the self-supervised pretraining phase
+  contrastive_lr: 4.0e-5       # phase-1 learning rate (defaults to `lr` if omitted)
+  contrastive_margin: 1.0      # triplet hinge margin (passed to contrastive_step)
 mixup_alpha: 0.8
 ema_decay: null
 seed: 0

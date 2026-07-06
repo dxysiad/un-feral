@@ -44,6 +44,8 @@ def _cmd_train(args):
         cfg['data']['subsample_keep_rare_threshold'] = args.subsample_keep_rare_threshold
     if args.gradient_checkpointing:
         cfg['model']['gradient_checkpointing'] = True
+    if args.contrastive_epochs is not None:
+        cfg['training']['contrastive_epochs'] = args.contrastive_epochs
 
     SHARED_WANDB_KEY = "dde17687b4b84ba8171dfede64d865243be41a0e"
     SHARED_WANDB_ENTITY = "sposiboh"
@@ -224,6 +226,9 @@ def main():
     p_train.add_argument('--gradient-checkpointing', action='store_true',
                          help='Enable activation/gradient checkpointing to cut VRAM (~25-30%% slower; '
                               'fits V-JEPA ViT-L in ~9GB at bs4). Not supported for VideoPrism.')
+    p_train.add_argument('--contrastive-epochs', type=int, default=None,
+                         help='Run N epochs of self-supervised contrastive pretraining before '
+                              'classification (requires a "contrastive" split in the label JSON).')
     p_train.set_defaults(func=_cmd_train)
 
     # feral train-config
