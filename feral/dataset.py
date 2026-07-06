@@ -113,7 +113,7 @@ class ClsDataset():
         threshold) are kept and the remainder is filled from common chunks.
         """
         self.prefix = prefix
-        self.partition = partition
+        self.partition = partition # train / val / test / inference
         self.predict_per_item = predict_per_item
         self.num_classes = num_classes
         self.is_multilabel = None
@@ -125,19 +125,20 @@ class ClsDataset():
         if do_aa and self.partition == "train":
             self.aug = TrivialAugmentWide()
         else:
-             self.aug = None
+            self.aug = None
 
         self.norm = torchvision.transforms.v2.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)) # vjepa
         self.scale = 0.00392156862745098
 
         if part_sample < 1.0 and partition == 'train':
-            if subsample_keep_rare_threshold is None:
+            if subsample_keep_rare_threshold is None: # randomly samples chunks
                 logger.info("%s using %.2f%% of chunks", partition, 100 * part_sample)
                 new_len = round(part_sample * len(self.samples))
                 new_indexes = random.sample(list(range(len(self.samples))), new_len)
                 self.samples = [self.samples[i] for i in new_indexes]
                 self.labels = [self.labels[i] for i in new_indexes]
-            else:
+            else: 
+                # keeps all chunks with a rare class and fills rest with randomly chosen "common" chunks
                 all_labels = np.array(self.labels)
                 flat_labels = all_labels.reshape(-1) if not self.is_multilabel else all_labels.reshape(-1, all_labels.shape[-1])
                 class_freqs = get_class_frequencies(flat_labels, num_classes=self.num_classes)
@@ -166,6 +167,7 @@ class ClsDataset():
                 self.labels = [self.labels[i] for i in final_idx]
 
         if partition != 'inference':
+            # sanity-checks dataset composition
             concat_labels = np.array(self.labels)
             if self.is_multilabel:
                 cls_cnts = concat_labels.sum(axis=(0, 1))
@@ -194,6 +196,7 @@ class ClsDataset():
                 orig_w, orig_h = get_video_dims(pth)
                 self.decode_size = compute_decode_size(orig_w, orig_h, self.resize_to, self.resize_style)
             if self.partition != 'inference':
+                # checks that video frame count matches label frame count
                 json_total_frames = len(self.json_data['labels'][fn])
                 assert json_total_frames == video_total_frames, f"Bad json for video {fn}. Video has {video_total_frames} frames, labels have {json_total_frames} frames"
             frame_ids = get_frame_ids(video_total_frames, chunk_shift, chunk_length, chunk_step)
@@ -210,7 +213,7 @@ class ClsDataset():
         """Convert a chunk's labels to a float tensor, one-hot encoding single-label targets."""
         target = torch.tensor(target).long()
         if len(target.shape) == 1:
-            target = one_hot(target, self.num_classes)
+            target = one_hot(target, self.num_classes) # one-hot encoding: text to binary numerical arrays
         target = target.float() 
         return target
 
@@ -247,7 +250,6 @@ class ClsDataset():
 
     def __getitem__(self, index):
         """Return the chunk at ``index``, retrying up to 3 random indices on failure."""
-        # TODO: Two videos w/ one augmented + another section/video
         try:
             return self.get_item_simple(index)
         except Exception:
@@ -266,6 +268,161 @@ class ClsDataset():
         return len(self.samples)
 
 
+class ContrastiveVideoDataset():
+    """Unsupervised triplet dataset for contrastive / embedding pretraining.
+
+    Each item is a dict of three augmented 64-frame chunks:
+
+        - ``vid1`` and ``vid2``: two *independent* augmentations of the SAME
+          chunk (same video, same frames -> a positive pair).
+        - ``vid3``: an augmentation of a DIFFERENT chunk, drawn from the same
+          or a different video (a contrastive / negative view).
+
+    Unlike ``ClsDataset`` there are no labels. ``__init__`` pre-generates a
+    fixed list of ``num_samples`` (primary_chunk, other_chunk) pairs
+    (the "generate samples" step); ``__getitem__`` decodes and augments them.
+    Call ``resample()`` between epochs to draw fresh pairs.
+    """
+
+    def __init__(self, video_paths, num_samples, chunk_length, chunk_step,
+                 resize_to, resize_style="square", do_aa=True, prefix="",
+                 seed=None, **kwargs):
+        self.prefix = prefix
+        self.video_paths = list(video_paths)
+        self.chunk_length = chunk_length
+        self.chunk_step = chunk_step
+        self.resize_to = resize_to
+        self.resize_style = resize_style
+        self.num_samples = num_samples
+        self.rng = random.Random(seed)
+
+        self.aug = TrivialAugmentWide() if do_aa else None
+        self.norm = torchvision.transforms.v2.Normalize(
+            (0.485, 0.456, 0.406), (0.229, 0.224, 0.225))  # vjepa
+        self.scale = 0.00392156862745098
+
+        # frames a chunk spans in real time (number of 'real' frames in a chunk): (L-1)*step + 1 
+        self.span = (chunk_length - 1) * chunk_step + 1
+
+        # Per-video frame counts + shared decode size (assumes uniform dims,
+        # same assumption ClsDataset makes).
+        self.frame_counts = {}
+        self.decode_size = None
+        self.usable_paths = []
+        for fn in self.video_paths:
+            pth = os.path.join(self.prefix, fn)
+            total = get_frame_count(pth)
+            if total is None or total < self.span:
+                logger.warning("Skipping %s: %s frames, need >= %d", fn, total, self.span)
+                continue
+            self.frame_counts[fn] = total
+            self.usable_paths.append(fn)
+            if self.decode_size is None:
+                w, h = get_video_dims(pth)
+                self.decode_size = compute_decode_size(w, h, resize_to, resize_style)
+        if not self.usable_paths:
+            raise ValueError("No videos long enough to form a chunk")
+
+        self.resample()
+
+    def _random_chunk(self):
+        """Pick a random (filename, frame_indices) chunk at a random start."""
+        fn = self.rng.choice(self.usable_paths)
+        start = self.rng.randint(0, self.frame_counts[fn] - self.span)
+        frames = list(range(start, start + self.span, self.chunk_step))
+        return fn, frames
+
+    def _chunk_with_offset(self, fn, start, offset):
+        """Return a chunk starting at start + offset"""
+        new_start = start + offset
+        max_start = self.frame_counts[fn] - self.span
+        new_start = max(0, min(new_start, max_start))
+        frames = list(range(new_start, new_start + self.span, self.chunk_step))
+        return fn, frames
+    
+    def _chunks_overlap(self, chunk_a, chunk_b):
+        """Return True if two chunks share any frame indices"""
+        fn_a, frames_a = chunk_a
+        fn_b, frames_b = chunk_b
+        if fn_a != fn_b:
+            return False # No overlap
+        return len(set(frames_a) & set(frames_b)) > 0
+
+    def resample(self):
+        """(Re)generate the fixed list of (primary, other) chunk pairs."""
+        self.samples = []
+        for _ in range(self.num_samples):
+            primary = self._random_chunk()
+
+            # precompute shifted chunk to check vid3 against both
+            offset = self.rng.choice([-32, 32])
+            fn, frames = primary
+            shifted = self._chunk_with_offset(fn, frames[0], offset)
+            
+            # reject any vid3 that overlaps with either vid1 or vid2
+            other = self._random_chunk()
+            max_tries = 20
+            for _ in range(max_tries):
+                if not self._chunks_overlap(other, primary) and \
+                not self._chunks_overlap(other, shifted):
+                    break
+                # TODO: May need to sample from another video if impossible
+                other = self._random_chunk()
+            else:
+                logger.warning("Could not find non-overlapping vid3 after %d tries", max_tries)
+            
+            self.samples.append((primary, shifted, other))
+
+            """
+            # ensure vid3 is a genuinely different chunk (diff video or start)
+            while other[0] == primary[0] and other[1][0] == primary[1][0]:
+                other = self._random_chunk()
+            self.samples.append((primary, other))
+            """
+
+    def _transform(self, video):
+        """Augment (optional), scale to [0,1], and normalize a (T,C,H,W) chunk."""
+        if self.aug is not None:
+            video = self.aug(video)
+        return self.norm(video * self.scale)
+
+    def _decode(self, chunk):
+        fn, frames = chunk
+        w, h = self.decode_size
+        return read_range_video_decord(os.path.join(self.prefix, fn), frames, width=w, height=h)
+
+    def get_item_simple(self, index):
+        primary, shifted, other = self.samples[index]
+
+        vid_a = self._decode(primary)   # decoded once...
+        vid_b = self._decode(shifted) # same as vid_a, shifted start
+        vid_c = self._decode(other)
+
+        return {
+            # vid1 & vid2: two independent draws of the augmentation on the
+            # SAME source frames (self.aug samples fresh randomness per call).
+            "vid1": self._transform(vid_a),
+            "vid2": self._transform(vid_b),
+            "vid3": self._transform(vid_c),
+        }
+
+    def __getitem__(self, index):
+        """Return the triplet at ``index``, retrying up to 3 random indices on failure."""
+        try:
+            return self.get_item_simple(index)
+        except Exception:
+            logger.warning("Error loading index %d:\n%s", index, traceback.format_exc())
+            for _ in range(3):
+                alt_index = np.random.randint(0, len(self))
+                try:
+                    return self.get_item_simple(alt_index)
+                except Exception:
+                    logger.warning("Error loading index %d:\n%s", alt_index, traceback.format_exc())
+            raise RuntimeError(f"Failed to load sample after multiple retries.\nLast error:\n{traceback.format_exc()}")
+
+    def __len__(self):
+        return len(self.samples)
+
 def collate_fn_val(batch):
     """Collate ``(tensor, target, names)`` items, stacking tensors and targets."""
     tensors, targets, names = zip(*batch)
@@ -278,3 +435,11 @@ def collate_fn_inference(batch):
     tensors, names = zip(*batch)
     tensors = torch.stack(tensors)
     return tensors, names
+
+def collate_fn_contrastive(batch):
+    """Collate triplet dicts into stacked tensors."""
+    return {
+        'vid1': torch.stack([b['vid1'] for b in batch]),
+        'vid2': torch.stack([b['vid2'] for b in batch]),
+        'vid3': torch.stack([b['vid3'] for b in batch]),
+    }

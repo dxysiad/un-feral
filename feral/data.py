@@ -2,7 +2,7 @@ import logging
 
 from torch.utils.data import DataLoader
 
-from feral.dataset import ClsDataset, collate_fn_val, collate_fn_inference
+from feral.dataset import ClsDataset, ContrastiveVideoDataset, collate_fn_val, collate_fn_inference, collate_fn_contrastive
 from feral.utils import resolve_num_workers
 
 logger = logging.getLogger(__name__)
@@ -13,6 +13,7 @@ _PARTITION_SPECS = {
     'val':       {'shuffle': False, 'drop_last': False, 'collate_fn': collate_fn_val},
     'test':      {'shuffle': False, 'drop_last': False, 'collate_fn': collate_fn_val},
     'inference': {'shuffle': False, 'drop_last': False, 'collate_fn': collate_fn_inference},
+    'contrastive': {'shuffle': True, 'drop_last': True, 'collate_fn': collate_fn_contrastive}
 }
 
 
@@ -46,28 +47,45 @@ def build_datasets_and_loaders(cfg, labels_json, num_classes):
             continue
 
         part_kwargs = dict(data_kwargs)
-        if partition != 'train' and eval_chunk_shift is not None:
+        # ContrastiveVideoDataset uses random chunk starts (no chunk_shift), so the
+        # eval_chunk_shift override only applies to the labeled eval partitions.
+        if partition not in ('train', 'contrastive') and eval_chunk_shift is not None:
             logger.info("%s: eval_chunk_shift overrides chunk_shift %s -> %s",
                         partition, part_kwargs.get('chunk_shift'), eval_chunk_shift)
             part_kwargs['chunk_shift'] = eval_chunk_shift
 
-        dataset = ClsDataset(
-            partition=partition,
-            label_json_dict=labels_json,
-            num_classes=num_classes,
-            predict_per_item=cfg['predict_per_item'],
-            **part_kwargs,
-        )
-
-        if partition != 'inference':
-            assert labels_json['is_multilabel'] == dataset.is_multilabel, (
-                f"Config is_multilabel doesn't match the data! "
-                f"config: {labels_json['is_multilabel']} dataset: {dataset.is_multilabel}"
+        if partition == 'contrastive':
+            dataset = ContrastiveVideoDataset(
+                video_paths=split,           # list of video filenames, same as other splits
+                num_samples=cfg['training']['contrastive_num_samples'],
+                chunk_length=part_kwargs['chunk_length'],
+                chunk_step=part_kwargs['chunk_step'],
+                resize_to=part_kwargs['resize_to'],
+                resize_style=part_kwargs.get('resize_style', 'square'),
+                do_aa=part_kwargs.get('do_aa', True),
+                prefix=part_kwargs['prefix'],
+                seed=cfg['seed'],
+            )
+        else:
+            dataset = ClsDataset(
+                partition=partition,
+                label_json_dict=labels_json,
+                num_classes=num_classes,
+                predict_per_item=cfg['predict_per_item'],
+                **part_kwargs,
             )
 
+            if partition != 'inference':
+                assert labels_json['is_multilabel'] == dataset.is_multilabel, (
+                    f"Config is_multilabel doesn't match the data! "
+                    f"config: {labels_json['is_multilabel']} dataset: {dataset.is_multilabel}"
+                )
+
+        # train and contrastive are the full-batch training partitions (train_bs);
+        # val/test/inference use val_bs.
         loader = DataLoader(
             dataset,
-            batch_size=train_bs if partition == 'train' else val_bs,
+            batch_size=train_bs if partition in ('train', 'contrastive') else val_bs,
             shuffle=spec['shuffle'],
             drop_last=spec['drop_last'],
             collate_fn=spec['collate_fn'],
