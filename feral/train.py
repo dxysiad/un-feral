@@ -1,6 +1,6 @@
 from feral.data import build_datasets_and_loaders
-from feral.loops import train_one_epoch, evaluate, run_inference
-from feral.modeling import build_model, build_training_objects, load_model_from_checkpoint
+from feral.loops import train_one_epoch, train_contrastive_epoch, evaluate, run_inference
+from feral.modeling import build_model, build_training_objects, build_contrastive_objects, load_model_from_checkpoint
 from feral.utils import save_model, pick_and_save_best, validate_labels_json, check_environment
 import yaml
 import torch
@@ -115,15 +115,48 @@ def main(cfg):
     test_loader = loaders.get('test')
     inference_loader = loaders.get('inference')
 
+    # contrastive dataset/dataloader
+    contrastive_dataset = datasets.get('contrastive')
+    contrastive_loader = loaders.get('contrastive')
+
     device = torch.device(cfg.get('device', 'cuda'))
+
+    run_contrastive = (contrastive_loader is not None
+                       and cfg['training'].get('contrastive_epochs', 0) > 0)
 
     # not all train/val/test/inference splits have to be present
     # only builds model & optimizer if train loader is present - script doubles as training & eval/inference script
+    # the model is also built for the standalone contrastive pretraining phase.
 
-    if train_loader is not None:
+    if train_loader is not None or run_contrastive:
         model, model_ema = build_model(cfg, num_classes, device)
         if wandb.run is not None:
             wandb.run.summary['n_params'] = sum(p.numel() for p in model.parameters())
+
+    # Phase 1: self-supervised contrastive pretraining of the encoder (no labels).
+    if run_contrastive:
+        logger.info("Contrastive pretraining for %d epochs (%d samples/epoch)",
+                    cfg['training']['contrastive_epochs'], len(contrastive_dataset))
+        pre_opt, pre_sched = build_contrastive_objects(cfg, model, contrastive_loader)
+        for epoch in range(cfg['training']['contrastive_epochs']):
+            contrastive_dataset.resample()
+            avg_loss = train_contrastive_epoch(
+                model, contrastive_loader, pre_opt, pre_sched, device=device,
+                margin=cfg['training'].get('contrastive_margin', 1.0),
+                log_fn=wandb.log, max_batches=cfg.get('max_batches'),
+                grad_clip_norm=cfg['training'].get('grad_clip_norm'),
+                log_grad_norm=cfg['training'].get('log_grad_norm', True),
+            )
+            logger.info("Contrastive epoch %d: loss %.4f", epoch, avg_loss)
+            wandb.log({'contrastive/epoch_loss': avg_loss, 'contrastive/epoch': epoch})
+        pretrained_path = os.path.join("checkpoints", f"{cfg['run_name']}_pretrained.pt")
+        save_model(model, pretrained_path, model_save_metadata)
+        logger.info("Saved pretrained encoder to %s", pretrained_path)
+        del pre_opt, pre_sched
+        torch.cuda.empty_cache()
+
+    # Phase 2: supervised classification training.
+    if train_loader is not None:
         criterion, optimizer, lr_scheduler, mixup = build_training_objects(
             cfg, model, train_dataset, train_loader, labels_json, device,
         )

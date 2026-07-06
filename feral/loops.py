@@ -37,7 +37,6 @@ def _global_grad_norm(parameters, norm_type=2.0):
 
 
 def _per_element_loss(output, target, is_multilabel):
-    # TODO: Contrastive loss
     """Unreduced per-sample loss (for the heavy 'loss distribution' histogram).
 
     Mirrors the training criterion but with reduction='none'; weights and label
@@ -221,3 +220,58 @@ def run_inference(model, loader, *, is_multilabel, device, max_batches=None):
                 break
 
     return answers
+
+
+def train_contrastive_epoch(model, loader, optimizer, scheduler, *, device,
+                            margin=1.0, normalize=True, hinge=True,
+                            log_fn=None, max_batches=None,
+                            grad_clip_norm=None, log_grad_norm=True):
+    """Run one epoch of self-supervised contrastive pretraining. Returns avg_loss.
+
+    Mirrors ``train_one_epoch`` but stripped to the SSL essentials: the loader
+    yields {vid1, vid2, vid3} triplet batches, the loss is the per-frame triplet
+    loss from ``feral.contrastive`` (no criterion/mixup/EMA/metrics), and only the
+    encoder (backbone + clip_projector) receives gradients.
+    """
+    from feral.contrastive import contrastive_step
+    model.train()
+    losses = []
+    t_end = time.perf_counter()
+    for i, batch in enumerate(tqdm(loader, total=len(loader))):
+        t_data = time.perf_counter() - t_end
+        batch = {k: v.to(device) for k, v in batch.items()}
+        optimizer.zero_grad()
+        with torch.amp.autocast(dtype=torch.bfloat16, device_type="cuda"):
+            loss, diag = contrastive_step(model, batch, margin=margin,
+                                          normalize=normalize, hinge=hinge)
+        loss.backward()
+
+        grad_norm = None
+        if grad_clip_norm is not None:
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip_norm)
+        elif log_grad_norm:
+            grad_norm = _global_grad_norm(model.parameters())
+
+        optimizer.step()
+        scheduler.step()
+
+        loss_val = loss.item()
+        if log_fn is not None:
+            batch_logs = {
+                'contrastive/batch_loss': loss_val,
+                'contrastive/d_pos': diag['d_pos'],
+                'contrastive/d_neg': diag['d_neg'],
+                'contrastive/lr': scheduler.get_last_lr()[0],
+                'perf/step_time': time.perf_counter() - t_end,
+                'perf/data_time': t_data,
+            }
+            if grad_norm is not None:
+                batch_logs['contrastive/grad_norm'] = grad_norm.item()
+            log_fn(batch_logs)
+
+        losses.append(loss_val)
+        if max_batches is not None and i + 1 >= max_batches:
+            break
+        t_end = time.perf_counter()
+
+    return sum(losses) / len(losses) if losses else 0.0
