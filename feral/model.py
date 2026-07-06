@@ -57,6 +57,17 @@ class FeralModel(nn.Module):
         self.head = nn.Linear(d, num_classes)
         self.backbone.freeze_encoder(freeze_encoder_layers)
 
+    def forward_features(self, x):
+        """Return per-frame feature vectors, shape (B, predict_per_item, D).
+
+        Same path as ``forward`` up to the attention-pooling projector, but skips
+        fc_norm/dropout/head — i.e. the representation the contrastive loss uses,
+        not class logits.
+        """
+        tokens = self.backbone(x)             # (B, N, D)
+        pooled = self.clip_projector(tokens)  # (B * predict_per_item, D)
+        return pooled.reshape(x.shape[0], -1, tokens.shape[-1])  # (B, predict_per_item, D)
+
     def forward(self, x):
         """Run input through backbone, attention pooling, norm/dropout, and head; returns class
         logits of shape (B * predict_per_item, num_classes)."""
