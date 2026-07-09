@@ -355,7 +355,11 @@ class ContrastiveVideoDataset():
             primary = self._random_chunk()
 
             # precompute shifted chunk to check vid3 against both
-            offset = self.rng.choice([-32, 32])
+            prob = self.rng.random()
+            if prob >= 0.5:
+                offset = self.rng.randint(-16, 16) # TODO: test different ranges (start w/ 16) / doesn't shift half of the time
+            else:
+                offset = 0
             fn, frames = primary
             shifted = self._chunk_with_offset(fn, frames[0], offset)
             

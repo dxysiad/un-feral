@@ -101,9 +101,9 @@ def main(cfg):
     torch.backends.cudnn.benchmark = True
 
     wandb.init(
-        entity=cfg.get('wandb', {}).get('entity'),
+        #entity=cfg.get('wandb', {}).get('entity'),
         project=cfg.get('wandb', {}).get('project'),
-        name=cfg['run_name'],
+        #name=cfg['run_name'],
         config=cfg,
         mode='disabled' if cfg.get('wandb') is None else 'online'
     )

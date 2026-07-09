@@ -78,7 +78,8 @@ def behavior_ethogram(ids, labels, *, cmap_name="tab20", figsize=None):
     ax.set_yticks([i + 0.5 for i in range(len(videos))])
     ax.set_yticklabels(videos, fontsize=8)
     ax.set_xlabel("chunk index (time →)")
-    ax.set_title("Behavior ethogram (per-chunk cluster)")
+    #ax.set_title("Behavior ethogram (per-chunk cluster)")
+    ax.set_title(" ")
     handles = [mpatches.Patch(color=colors[id_to_idx[c]],
                               label=("noise" if c == -1 else f"cluster {c}"))
                for c in uniq]

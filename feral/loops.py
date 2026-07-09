@@ -246,7 +246,7 @@ def train_contrastive_epoch(model, loader, optimizer, scheduler, *, device,
                                           normalize=normalize, hinge=hinge)
         loss.backward()
 
-        grad_norm = None
+        grad_norm = None # scales down vectors that grow past a set threshold to prevent exploding gradients
         if grad_clip_norm is not None:
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=grad_clip_norm)
         elif log_grad_norm:

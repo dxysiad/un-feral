@@ -64,7 +64,7 @@ class FeralModel(nn.Module):
         fc_norm/dropout/head — i.e. the representation the contrastive loss uses,
         not class logits.
         """
-        tokens = self.backbone(x)             # (B, N, D)
+        tokens = self.backbone(x)             # (B, N, D) -> (batch size, num of tokens per chunk, feature embedding dimension)
         pooled = self.clip_projector(tokens)  # (B * predict_per_item, D)
         return pooled.reshape(x.shape[0], -1, tokens.shape[-1])  # (B, predict_per_item, D)
 
