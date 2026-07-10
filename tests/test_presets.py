@@ -8,7 +8,6 @@ from feral.presets import (
     PRESETS,
     apply_mode,
     infer_chunk_shift,
-    infer_smoothing_window,
 )
 
 
@@ -18,15 +17,14 @@ def _base_cfg():
         "backbone": "vjepa2_vitl_diving48",
         "predict_per_item": 64,
         "model": {
-            "fc_drop_rate": 0.5,
-            "class_weights": "inv_freq_sqrt",
             "freeze_encoder_layers": 12,
-            "max_class_weight": None,
+            "gradient_checkpointing": False,
         },
         "data": {
             "chunk_length": 64,
             "chunk_shift": 32,
             "chunk_step": 1,
+            "eval_chunk_shift": None,
             "resize_to": 256,
             "resize_style": "square",
             "do_aa": True,
@@ -37,9 +35,7 @@ def _base_cfg():
             "compile": True,
             "grad_clip_norm": None,
         },
-        "mixup_alpha": 0.8,
-        "ema_decay": 0.999,
-        "multilabel_threshold": 0.85,
+        "seed": 0,
     }
 
 
@@ -73,20 +69,19 @@ class TestApplyMode:
     @pytest.mark.parametrize("mode", sorted(PRESETS))
     def test_deep_merge_keeps_untouched_keys(self, mode):
         out = apply_mode(_base_cfg(), mode)
-        # 'seed'-like base keys not in any preset survive; and nested model dict
-        # keeps base keys the overlay doesn't mention.
-        assert "fc_drop_rate" in out["model"]
+        # base keys not in any preset survive; and nested model dict keeps base
+        # keys the overlay doesn't mention.
+        assert "gradient_checkpointing" in out["model"]
         assert out["data"]["chunk_step"] == 1
+        assert out["seed"] == 0
 
     def test_every_mode_has_help_text(self):
         assert set(MODE_HELP) == set(PRESETS)
 
     @pytest.mark.parametrize("mode", sorted(PRESETS))
     def test_predict_per_item_matches_chunk_length(self, mode):
-        # The head emits predict_per_item tokens/item; targets are built per
-        # chunk frame. A preset that changes chunk_length must keep them equal,
-        # or loss shapes mismatch (regression: max once changed chunk_length
-        # without pinning predict_per_item).
+        # The projector emits predict_per_item tokens/item, one per chunk frame.
+        # A preset that changes chunk_length must keep them equal.
         out = apply_mode(_base_cfg(), mode)
         assert out["predict_per_item"] == out["data"]["chunk_length"]
 
@@ -102,11 +97,6 @@ class TestLite:
         assert out["training"]["lr"] == pytest.approx(4.0e-5)
         # lite is a plain full fine-tune: stabilization OFF.
         assert out["training"].get("grad_clip_norm") in (None,)
-        assert out["model"].get("max_class_weight") in (None,)
-
-    def test_ema_off(self):
-        out = apply_mode(_base_cfg(), "lite")
-        assert out["ema_decay"] is None
 
     def test_default_overlap_is_50pct(self):
         out = apply_mode(_base_cfg(), "lite")
@@ -127,47 +117,31 @@ class TestMax:
         assert out["model"]["freeze_encoder_layers"] == base["model"]["freeze_encoder_layers"]
 
     def test_66pct_train_overlap(self):
-        # max still TRAINS at 66% overlap (chunk_shift); eval/inference are denser.
+        # max still TRAINS at 66% overlap (chunk_shift); inference is denser.
         out = apply_mode(_base_cfg(), "max")
         cl, cs = out["data"]["chunk_length"], out["data"]["chunk_shift"]
-        assert cs == 21          # matches configs/.../camls_dense_overlap_66.yaml
+        assert cs == 21
         assert cs == cl // 3
         assert (1 - cs / cl) == pytest.approx(0.67, abs=0.01)  # ~66% by repo convention
 
-    def test_80pct_eval_overlap(self):
-        # max EVALUATES/INFERS at a denser 80% overlap via eval_chunk_shift.
+    def test_80pct_inference_overlap(self):
+        # max extracts embeddings at a denser 80% overlap via eval_chunk_shift.
         out = apply_mode(_base_cfg(), "max")
         cl, ecs = out["data"]["chunk_length"], out["data"]["eval_chunk_shift"]
-        assert ecs == 12         # 80% overlap = chunk_length // 5, same convention as ablation configs
+        assert ecs == 12
         assert ecs == cl // 5
         assert (1 - ecs / cl) == pytest.approx(0.80, abs=0.02)
 
-    def test_eval_smoothing_window_is_9(self):
-        out = apply_mode(_base_cfg(), "max")
-        assert out["data"]["eval_smoothing_window"] == 9
-
-    def test_ema_on(self):
-        # max re-enables EMA even when default disables it.
-        base = _base_cfg()
-        base["ema_decay"] = None
-        out = apply_mode(base, "max")
-        assert out["ema_decay"] == 0.999
-
 
 class TestRare:
-    def test_ema_and_mixup_off(self):
+    def test_lite_backbone(self):
         out = apply_mode(_base_cfg(), "rare")
-        assert out["ema_decay"] is None
-        assert out["mixup_alpha"] is None
+        assert out["backbone"] == "vjepa2_1_vitb_384"
+        assert out["model"]["freeze_encoder_layers"] == 0
 
     def test_stabilization_on(self):
         out = apply_mode(_base_cfg(), "rare")
         assert out["training"]["grad_clip_norm"] == 1.0
-        assert out["model"]["max_class_weight"] == 20
-
-    def test_label_smoothing_off(self):
-        out = apply_mode(_base_cfg(), "rare")
-        assert out["training"]["label_smoothing"] == 0.0
 
 
 class TestPublicAPI:
@@ -205,17 +179,3 @@ class TestInferChunkShift:
 
     def test_never_returns_zero(self):
         assert infer_chunk_shift("max", 2) == 1
-
-
-class TestInferSmoothingWindow:
-    def test_max_smooths_9(self):
-        assert infer_smoothing_window("max") == 9
-
-    def test_lite_is_noop(self):
-        assert infer_smoothing_window("lite") is None
-
-    def test_rare_is_noop(self):
-        assert infer_smoothing_window("rare") is None
-
-    def test_none_is_noop(self):
-        assert infer_smoothing_window(None) is None
