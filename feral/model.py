@@ -33,18 +33,24 @@ class AttentionPoolingBlockCustom(nn.Module):
 
 
 class FeralModel(nn.Module):
+    """Unsupervised video encoder: a backbone plus an attention-pooling projector.
+
+    The model has no classification head — it maps a chunk to per-frame feature
+    vectors (the representation the contrastive objective is trained on and the
+    representation ``feral infer`` extracts as embeddings). ``forward`` and
+    ``forward_features`` are the same computation.
+    """
+
     def __init__(self,
             backbone,
-            num_classes,
             predict_per_item,
-            fc_drop_rate,
             freeze_encoder_layers=0,
             pretrained=True,
             gradient_checkpointing=False,
             **kwargs):
-        """Assemble the model: a backbone encoder, an attention-pooling projector (out_tokens =
-        predict_per_item), batch-norm, dropout, and a linear classification head. Freezes the first
-        freeze_encoder_layers backbone layers."""
+        """Assemble the encoder: a backbone plus an attention-pooling projector
+        (out_tokens = predict_per_item). Freezes the first freeze_encoder_layers
+        backbone layers. Extra kwargs (leftover config keys) are ignored."""
         super().__init__()
         self.backbone = BackboneAdapter(backbone, pretrained=pretrained, gradient_checkpointing=gradient_checkpointing)
         d = self.backbone.hidden_dim
@@ -52,27 +58,14 @@ class FeralModel(nn.Module):
         self.clip_projector = AttentionPoolingBlockCustom(
             embed_dim=d, num_heads=16, out_tokens=predict_per_item
         )
-        self.fc_norm = nn.BatchNorm1d(d)
-        self.fc_dropout = nn.Dropout(p=fc_drop_rate) if fc_drop_rate > 0 else nn.Identity()
-        self.head = nn.Linear(d, num_classes)
         self.backbone.freeze_encoder(freeze_encoder_layers)
 
     def forward_features(self, x):
-        """Return per-frame feature vectors, shape (B, predict_per_item, D).
-
-        Same path as ``forward`` up to the attention-pooling projector, but skips
-        fc_norm/dropout/head — i.e. the representation the contrastive loss uses,
-        not class logits.
-        """
+        """Return per-frame feature vectors, shape (B, predict_per_item, D)."""
         tokens = self.backbone(x)             # (B, N, D) -> (batch size, num of tokens per chunk, feature embedding dimension)
         pooled = self.clip_projector(tokens)  # (B * predict_per_item, D)
         return pooled.reshape(x.shape[0], -1, tokens.shape[-1])  # (B, predict_per_item, D)
 
     def forward(self, x):
-        """Run input through backbone, attention pooling, norm/dropout, and head; returns class
-        logits of shape (B * predict_per_item, num_classes)."""
-        x = self.backbone(x)
-        x = self.clip_projector(x)
-        x = self.fc_norm(x)
-        x = self.head(self.fc_dropout(x))
-        return x
+        """Alias for ``forward_features`` — the encoder has no classification head."""
+        return self.forward_features(x)

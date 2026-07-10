@@ -1,13 +1,14 @@
 """FERAL — Feature Extraction for Recognition of Animal Locomotion.
 
-Public Python API (lazy-loaded so ``import feral`` stays light — heavy deps
-like torch are only imported when you touch a symbol that needs them)::
+Unsupervised contrastive video-encoder training. Public Python API (lazy-loaded
+so ``import feral`` stays light — heavy deps like torch are only imported when
+you touch a symbol that needs them)::
 
     import feral
-    feral.run_training(cfg)                         # train from a config dict
-    feral.run_inference_folder(ckpt, video_folder)  # inference on a folder
+    feral.run_training(cfg)                         # contrastive training from a config dict
+    feral.run_inference_folder(ckpt, video_folder)  # extract per-chunk embeddings
     cfg = feral.apply_mode(cfg, "lite")             # apply a preset overlay
-    from feral import BACKBONES, FeralModel, ClsDataset, validate_labels_json
+    from feral import BACKBONES, FeralModel, ContrastiveVideoDataset, resolve_splits
 """
 
 from importlib.metadata import PackageNotFoundError, version
@@ -25,8 +26,8 @@ __all__ = [
     "PRESETS",
     "BACKBONES",
     "FeralModel",
-    "ClsDataset",
-    "validate_labels_json",
+    "ContrastiveVideoDataset",
+    "resolve_splits",
 ]
 
 # name -> (submodule, attribute). Public names deliberately avoid colliding with
@@ -39,8 +40,8 @@ _LAZY = {
     "PRESETS": ("feral.presets", "PRESETS"),
     "BACKBONES": ("feral.backbones", "BACKBONES"),
     "FeralModel": ("feral.model", "FeralModel"),
-    "ClsDataset": ("feral.dataset", "ClsDataset"),
-    "validate_labels_json": ("feral.utils", "validate_labels_json"),
+    "ContrastiveVideoDataset": ("feral.dataset", "ContrastiveVideoDataset"),
+    "resolve_splits": ("feral.data", "resolve_splits"),
 }
 
 

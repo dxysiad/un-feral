@@ -53,3 +53,4 @@ feral = { path = ".", editable = true }
 
 [tool.pixi.dependencies]
 jupyter = ">=1.1.1,<2"
+pip = ">=26.1.2,<27"

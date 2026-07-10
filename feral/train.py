@@ -1,20 +1,17 @@
-from feral.data import build_datasets_and_loaders
-from feral.loops import train_one_epoch, train_contrastive_epoch, evaluate, run_inference
-from feral.modeling import build_model, build_training_objects, build_contrastive_objects, load_model_from_checkpoint
-from feral.utils import save_model, pick_and_save_best, validate_labels_json, check_environment
-import yaml
+import datetime
+import logging
+import os
+import random
+
+import numpy as np
 import torch
 import wandb
-import json
-import datetime
-import numpy as np
-import random
-from feral.metrics import generate_empty_logits, ensemble_predictions, postprocess_predictions
-from feral.metrics import calculate_multiclass_metrics, calc_frame_level_map, generate_raster_plot, save_inference_results, calculate_f1_metrics, calculate_optimal_f1_metrics, generate_multilabel_raster_plot, compute_optimal_per_class_thresholds
-import sys
-import os
-import logging
-import warnings
+
+from feral.data import build_datasets_and_loaders, resolve_splits
+from feral.embeddings import extract_embeddings
+from feral.loops import train_contrastive_epoch, evaluate_contrastive
+from feral.modeling import build_model, build_contrastive_objects, load_model_from_checkpoint
+from feral.utils import save_model, check_environment
 
 logging.basicConfig(
     level=logging.INFO,
@@ -23,74 +20,26 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-warnings.filterwarnings(
-    "ignore",
-    message="No positive class found in y_true, recall is set to one for all thresholds.",
-    category=UserWarning,
-    module="sklearn.metrics._ranking"
-)
-
 # force pytorch to use flash-attention kernel for scaled dot product attention
 torch.backends.cuda.enable_math_sdp(False)
-torch.backends.cuda.enable_mem_efficient_sdp(False) 
+torch.backends.cuda.enable_mem_efficient_sdp(False)
+
 
 def _str_now():
     """Return the current local time as a filename-safe 'YYYY-MM-DD_HH-MM-SS' string."""
     return datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
 
-# raster plots to visualize per-frame predictions vs. ground truth over time
-def _add_raster_logs(logs, predictions, labels_json, partition, prefix, optimal_prefix, multilabel_threshold):
-    """
-    Adds raster image entries to `logs` under `{prefix}/raster_plot` (regular
-    threshold) and, for multilabel, `{optimal_prefix}/raster_plot` (per-class
-    optimal-F1 thresholds). `predictions` is the post-processed per-frame matrix
-    dict. Every step is guarded; failures are logged but never raised, so a broken
-    plot can't kill training.
-    """
-    is_ml = labels_json['is_multilabel']
-    try:
-        if is_ml:
-            img = generate_multilabel_raster_plot(predictions, labels_json, partition, multilabel_threshold)
-        else:
-            img = generate_raster_plot(predictions, labels_json, partition)
-        logs[f'{prefix}/raster_plot'] = wandb.Image(img)
-    except Exception:
-        logger.exception("regular raster plot failed for %s", prefix)
-
-    if not is_ml or optimal_prefix is None:
-        return
-    try:
-        opt_thr = compute_optimal_per_class_thresholds(predictions, labels_json, partition)
-        img = generate_multilabel_raster_plot(predictions, labels_json, partition, opt_thr)
-        logs[f'{optimal_prefix}/raster_plot'] = wandb.Image(img)
-    except Exception:
-        logger.exception("optimal raster plot failed for %s", optimal_prefix)
-
 
 def main(cfg):
-    """Run the full training/eval/inference pipeline for one config: build data, model,
-    and training objects, train with per-epoch validation and best-checkpoint selection
-    (with optional EMA and early stopping), then load the best checkpoint to run test
-    and/or inference. Logs metrics and raster plots to wandb and writes answers/checkpoints
-    to disk. Returns None."""
-    check_environment(compile_enabled=cfg['training']['compile']) # checks that the environment is properly configured
+    """Run the fully unsupervised contrastive training pipeline for one config.
 
-    with open(cfg['data']['label_json'], 'r') as f: # defines class names - determines is the task is multiclass or multilabel
-        labels_json = json.load(f)
-
-    validate_labels_json(labels_json, cfg['data'].get('prefix'))
-
-    class_names = {int(x): y for x, y in labels_json['class_names'].items()} # dict
-    num_classes = len(class_names)
-    # Per-frame smoothing applied to ensembled probabilities at val/test/inference
-    # (None = off). chunk overlap for those partitions is handled in data.py via
-    # eval_chunk_shift.
-    eval_smoothing = cfg['data'].get('eval_smoothing_window') # optional - reduces frame-to-frame noise
-    model_save_metadata = {
-        'class_names': class_names,
-        'is_multilabel': labels_json['is_multilabel'],
-        'cfg': cfg,
-    }
+    Builds the label-free splits, the headless encoder, and contrastive triplet
+    loaders, then trains the encoder with the per-frame triplet loss. Val/test
+    report held-out contrastive loss (no labels/metrics). The best encoder (lowest
+    val loss) is checkpointed; if an inference split is present its per-chunk
+    embeddings are extracted to an ``.npz``. Returns None.
+    """
+    check_environment(compile_enabled=cfg['training']['compile'])
 
     os.makedirs("answers", exist_ok=True)
     os.makedirs("checkpoints", exist_ok=True)
@@ -101,217 +50,120 @@ def main(cfg):
     torch.backends.cudnn.benchmark = True
 
     wandb.init(
-        #entity=cfg.get('wandb', {}).get('entity'),
         project=cfg.get('wandb', {}).get('project'),
-        #name=cfg['run_name'],
         config=cfg,
-        mode='disabled' if cfg.get('wandb') is None else 'online'
+        mode='disabled' if cfg.get('wandb') is None else 'online',
     )
 
-    datasets, loaders = build_datasets_and_loaders(cfg, labels_json, num_classes)
+    model_save_metadata = {'cfg': cfg}
+
+    splits = resolve_splits(cfg)
+    datasets, loaders = build_datasets_and_loaders(cfg, splits)
     train_dataset = datasets.get('train')
     train_loader = loaders.get('train')
     val_loader = loaders.get('val')
     test_loader = loaders.get('test')
     inference_loader = loaders.get('inference')
 
-    # contrastive dataset/dataloader
-    contrastive_dataset = datasets.get('contrastive')
-    contrastive_loader = loaders.get('contrastive')
-
     device = torch.device(cfg.get('device', 'cuda'))
 
-    run_contrastive = (contrastive_loader is not None
-                       and cfg['training'].get('contrastive_epochs', 0) > 0)
+    # Contrastive-loss knobs shared by train and eval.
+    margin = cfg['training'].get('contrastive_margin', 1.0)
+    loss_kwargs = dict(margin=margin)
 
-    # not all train/val/test/inference splits have to be present
-    # only builds model & optimizer if train loader is present - script doubles as training & eval/inference script
-    # the model is also built for the standalone contrastive pretraining phase.
-
-    if train_loader is not None or run_contrastive:
-        model, model_ema = build_model(cfg, num_classes, device)
+    # The model is built whenever there's something to train or evaluate.
+    if train_loader is not None or test_loader is not None or inference_loader is not None:
+        model = build_model(cfg, device)
         if wandb.run is not None:
             wandb.run.summary['n_params'] = sum(p.numel() for p in model.parameters())
 
-    # Phase 1: self-supervised contrastive pretraining of the encoder (no labels).
-    if run_contrastive:
-        logger.info("Contrastive pretraining for %d epochs (%d samples/epoch)",
-                    cfg['training']['contrastive_epochs'], len(contrastive_dataset))
-        pre_opt, pre_sched = build_contrastive_objects(cfg, model, contrastive_loader)
-        for epoch in range(cfg['training']['contrastive_epochs']):
-            contrastive_dataset.resample()
-            avg_loss = train_contrastive_epoch(
-                model, contrastive_loader, pre_opt, pre_sched, device=device,
-                margin=cfg['training'].get('contrastive_margin', 1.0),
-                log_fn=wandb.log, max_batches=cfg.get('max_batches'),
-                grad_clip_norm=cfg['training'].get('grad_clip_norm'),
-                log_grad_norm=cfg['training'].get('log_grad_norm', True),
-            )
-            logger.info("Contrastive epoch %d: loss %.4f", epoch, avg_loss)
-            wandb.log({'contrastive/epoch_loss': avg_loss, 'contrastive/epoch': epoch})
-        pretrained_path = os.path.join("checkpoints", f"{cfg['run_name']}_pretrained.pt")
-        save_model(model, pretrained_path, model_save_metadata)
-        logger.info("Saved pretrained encoder to %s", pretrained_path)
-        del pre_opt, pre_sched
-        torch.cuda.empty_cache()
+    best_checkpoint_path = os.path.join("checkpoints", f"{cfg['run_name']}_best_checkpoint.pt")
 
-    # Phase 2: supervised classification training.
     if train_loader is not None:
-        criterion, optimizer, lr_scheduler, mixup = build_training_objects(
-            cfg, model, train_dataset, train_loader, labels_json, device,
-        )
+        logger.info("Contrastive training for %d epochs (%d samples/epoch)",
+                    cfg['training']['epochs'], len(train_dataset))
+        optimizer, lr_scheduler = build_contrastive_objects(cfg, model, train_loader)
 
-        best_checkpoint_path = os.path.join("checkpoints", f"{cfg['run_name']}_best_checkpoint.pt")
-        best_map = -1
+        best_loss = float('inf')
         epochs_without_updates = 0
 
         for epoch in range(cfg['training']['epochs']):
-            answers, train_loss = train_one_epoch(
-                model, train_loader, criterion, optimizer, lr_scheduler,
-                mixup=mixup, model_ema=model_ema,
-                num_classes=num_classes, is_multilabel=labels_json['is_multilabel'],
-                predict_per_item=cfg['predict_per_item'],
-                device=device, log_fn=wandb.log, max_batches=cfg.get('max_batches'),
+            train_dataset.resample()
+            avg_loss = train_contrastive_epoch(
+                model, train_loader, optimizer, lr_scheduler, device=device,
+                log_fn=wandb.log, max_batches=cfg.get('max_batches'),
                 grad_clip_norm=cfg['training'].get('grad_clip_norm'),
                 log_grad_norm=cfg['training'].get('log_grad_norm', True),
-                heavy_log_every=cfg['training'].get('heavy_log_every'),
+                **loss_kwargs,
             )
-            logs = {
-                **calculate_multiclass_metrics(answers, class_names, 'train'),
-                'train/loss': train_loss,
-            }
+            logs = {'contrastive/epoch_loss': avg_loss, 'contrastive/epoch': epoch}
             if torch.cuda.is_available():
                 logs['perf/gpu_mem_gb'] = torch.cuda.max_memory_allocated() / 1e9
                 torch.cuda.reset_peak_memory_stats()
-            logger.info("%s", logs)
-            wandb.log(logs)
+            logger.info("Epoch %d: train contrastive loss %.4f", epoch, avg_loss)
 
             if val_loader is None:
                 save_model(model, best_checkpoint_path, model_save_metadata)
+                wandb.log(logs)
                 logger.info("Epoch %d: Saved model", epoch)
                 continue
 
-            answers, val_loss = evaluate(
-                model, val_loader, criterion,
-                num_classes=num_classes, is_multilabel=labels_json['is_multilabel'],
-                device=device, max_batches=cfg.get('max_batches'),
+            val_loss = evaluate_contrastive(
+                model, val_loader, device=device,
+                max_batches=cfg.get('max_batches'), **loss_kwargs,
             )
-            if model_ema is not None:
-                answers_ema, ema_val_loss = evaluate(
-                    model_ema.ema, val_loader, criterion,
-                    num_classes=num_classes, is_multilabel=labels_json['is_multilabel'],
-                    device=device, max_batches=cfg.get('max_batches'),
-                )
-            with open(os.path.join("answers", f"{cfg['run_name']}_{_str_now()}.json"), 'w') as f:
-                json.dump(answers, f)
-            # Ensemble + smooth the per-frame predictions once, then feed every metric.
-            val_preds = postprocess_predictions(
-                ensemble_predictions(answers, generate_empty_logits(labels_json, 'val')), eval_smoothing)
-            logs = {
-                **calculate_multiclass_metrics(answers, class_names, 'val'),
-                **calculate_f1_metrics(val_preds, labels_json, 'val', labels_json['is_multilabel'], 'val', cfg['multilabel_threshold']),
-                **calculate_optimal_f1_metrics(val_preds, labels_json, 'val', labels_json['is_multilabel'], 'val_optimal'),
-                'val/frame_level_map': calc_frame_level_map(val_preds, labels_json, 'val'),
-                'val/loss': val_loss,
-            }
-            _add_raster_logs(logs, val_preds, labels_json, 'val', 'val', 'val_optimal', cfg['multilabel_threshold'])
-            if model_ema is not None:
-                val_ema_preds = postprocess_predictions(
-                    ensemble_predictions(answers_ema, generate_empty_logits(labels_json, 'val')), eval_smoothing)
-                ema_logs = {
-                    **calculate_multiclass_metrics(answers_ema, class_names, 'val_ema'),
-                    **calculate_f1_metrics(val_ema_preds, labels_json, 'val', labels_json['is_multilabel'], 'val_ema', cfg['multilabel_threshold']),
-                    **calculate_optimal_f1_metrics(val_ema_preds, labels_json, 'val', labels_json['is_multilabel'], 'val_ema_optimal'),
-                    'val_ema/frame_level_map': calc_frame_level_map(val_ema_preds, labels_json, 'val'),
-                    'val_ema/loss': ema_val_loss,
-                }
-                _add_raster_logs(ema_logs, val_ema_preds, labels_json, 'val', 'val_ema', 'val_ema_optimal', cfg['multilabel_threshold'])
-                logs.update(ema_logs)
-            logger.info("%s", logs)
+            logs['val/contrastive_loss'] = val_loss
+            logger.info("Epoch %d: val contrastive loss %.4f", epoch, val_loss)
             wandb.log(logs)
 
-            # save best model
-            val_map = logs['val/frame_level_map']
-            ema_map = logs.get('val_ema/frame_level_map', -2)
-            best_map, saved = pick_and_save_best(
-                model, model_ema, val_map, ema_map, best_map, best_checkpoint_path,
-                model_save_metadata,
-            )
-            if saved == 'base':
+            # Lower val contrastive loss is better.
+            if val_loss < best_loss:
+                best_loss = val_loss
                 epochs_without_updates = 0
-                logger.info("Epoch %d: Saved base model checkpoint with val/frame_level_map=%.4f", epoch, val_map)
-            elif saved == 'ema':
-                epochs_without_updates = 0
-                logger.info("Epoch %d: Saved EMA model checkpoint with val_ema/frame_level_map=%.4f", epoch, ema_map)
+                save_model(model, best_checkpoint_path, model_save_metadata)
+                logger.info("Epoch %d: Saved best checkpoint with val/contrastive_loss=%.4f", epoch, val_loss)
             else:
                 epochs_without_updates += 1
                 logger.info("Epoch %d: Didnt improve for %d epochs", epoch, epochs_without_updates)
                 patience = cfg['training'].get('patience')
                 if patience is not None and epochs_without_updates >= patience:
-                    logger.info("Epoch %d: Early stopping: no improvement for %d epochs, stopping training.", epoch, patience)
+                    logger.info("Epoch %d: Early stopping: no improvement for %d epochs", epoch, patience)
                     break
 
-        logger.info("Finished training")
-        logger.info("Best checkpoint: %s. best_map: %.4f", best_checkpoint_path, best_map)
-        del model 
-        del model_ema
-        del optimizer
-        del lr_scheduler
+        logger.info("Finished training. Best checkpoint: %s (best val loss: %.4f)",
+                    best_checkpoint_path, best_loss)
+        del model, optimizer, lr_scheduler
         torch.cuda.empty_cache()
-    if inference_loader is None and test_loader is None:
+
+    if test_loader is None and inference_loader is None:
         return
-    
+
     logger.info("Loading model for test/inference")
-    if train_loader is not None:
-        test_checkpoint_path = best_checkpoint_path
-    else:
-        test_checkpoint_path = cfg['starting_checkpoint']
-    
-    best_model, _checkpoint_meta = load_model_from_checkpoint(cfg, device, test_checkpoint_path, num_classes=num_classes)
+    test_checkpoint_path = best_checkpoint_path if train_loader is not None else cfg['starting_checkpoint']
+    best_model, _meta = load_model_from_checkpoint(cfg, device, test_checkpoint_path)
 
     if test_loader is not None:
-        logger.info("Running test...")
-        answers, _ = evaluate(
-            best_model, test_loader,
-            num_classes=num_classes, is_multilabel=labels_json['is_multilabel'],
-            device=device, max_batches=cfg.get('max_batches')
+        logger.info("Running test (held-out contrastive loss)...")
+        test_loss = evaluate_contrastive(
+            best_model, test_loader, device=device,
+            max_batches=cfg.get('max_batches'), **loss_kwargs,
         )
-        with open(os.path.join("answers", f"{cfg['run_name']}_raw_test.json"), 'w') as f:
-            json.dump(answers, f)
-        predictions = postprocess_predictions(
-            ensemble_predictions(answers, generate_empty_logits(labels_json, 'test')), eval_smoothing)
-        with open(os.path.join("answers", f"{cfg['run_name']}_ensembled_test.json"), 'w') as f:
-            if labels_json['is_multilabel']:
-                json.dump({
-                    'pred': {x: ((y > cfg['multilabel_threshold']) * 1).tolist() for x, y in predictions.items()},
-                    'gt': {x: labels_json['labels'][x] for x, y in predictions.items()},
-                    'class_names': labels_json['class_names']
-                }, f)
-            else:
-                json.dump({
-                    'pred': {x: y.argmax(1).tolist() for x, y in predictions.items()},
-                    'gt': {x: labels_json['labels'][x] for x, y in predictions.items()},
-                    'class_names': labels_json['class_names']
-                }, f)
-        logs = {
-            **calculate_multiclass_metrics(answers, class_names, 'test'),
-            **calculate_f1_metrics(predictions, labels_json, 'test', labels_json['is_multilabel'], 'test', cfg['multilabel_threshold']),
-            **calculate_optimal_f1_metrics(predictions, labels_json, 'test', labels_json['is_multilabel'], 'test_optimal'),
-            'test/frame_level_map': calc_frame_level_map(predictions, labels_json, 'test'),
-        }
-        _add_raster_logs(logs, predictions, labels_json, 'test', 'test', 'test_optimal', cfg['multilabel_threshold'])
-        logger.info("%s", logs)
-        wandb.log(logs)
+        logger.info("test/contrastive_loss: %.4f", test_loss)
+        wandb.log({'test/contrastive_loss': test_loss})
 
     if inference_loader is not None:
-        logger.info("Running inference...")
-        answers = run_inference(
-            best_model, inference_loader,
-            is_multilabel=labels_json['is_multilabel'], device=device, max_batches=cfg.get('max_batches')
+        logger.info("Extracting embeddings for the inference split...")
+        emb, ids = extract_embeddings(
+            best_model, inference_loader, device=device,
+            pool=cfg['data'].get('embedding_pool', 'mean'),
+            max_batches=cfg.get('max_batches'),
         )
-        out_pth = os.path.join("answers", f"_inference_{cfg['run_name']}_{_str_now()}.json")
-        save_inference_results(answers, [], cfg['data']['prefix'], labels_json, out_pth, smoothing_window=eval_smoothing)
-       
+        out_pth = os.path.join("answers", f"_embeddings_{cfg['run_name']}_{_str_now()}.npz")
+        files = np.array([f for f, _ in ids])
+        starts = np.array([s for _, s in ids])
+        np.savez(out_pth, emb=emb.numpy(), files=files, starts=starts)
+        logger.info("Saved %d embeddings to %s", len(files), out_pth)
+
 
 if __name__ == '__main__':
     from feral.cli import main as cli_main

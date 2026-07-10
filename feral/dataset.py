@@ -3,14 +3,11 @@ import os
 from decord import VideoReader
 import torch
 from torchvision.transforms.v2 import TrivialAugmentWide
-from torch.nn.functional import one_hot
 import numpy as np
 import cv2
-import json
 import traceback
 import random
 import logging
-from feral.utils import get_class_frequencies
 
 logger = logging.getLogger(__name__)
 
@@ -100,93 +97,47 @@ def get_video_dims(path: str):
         cap.release()
 
 class ClsDataset():
+    """Label-free chunk enumerator over a set of videos (inference partition only).
+
+    Splits each video into overlapping fixed-size chunks and yields
+    ``(video_tensor, names)`` per chunk — the input for embedding extraction.
+    """
+
     def __init__(self, partition, label_json_dict, do_aa, predict_per_item,
                  num_classes, prefix, resize_to, chunk_shift, chunk_length,
-                 chunk_step, resize_style="square", part_sample=1.0,
-                 subsample_keep_rare_threshold=None, **kwargs):
-        """Build the chunk samples/labels for a partition and set up transforms.
+                 chunk_step, resize_style="square", **kwargs):
+        """Build the chunk samples for the inference partition and set up transforms.
 
-        Parses the label JSON into ``(filename, frame_ids)`` chunks, configures
-        augmentation/normalization, and optionally subsamples the train set to
-        ``part_sample`` of its chunks. When ``subsample_keep_rare_threshold`` is
-        set, all chunks containing a rare class (class frequency below the
-        threshold) are kept and the remainder is filled from common chunks.
+        ``label_json_dict`` only needs a ``splits`` dict listing filenames per
+        partition (no per-frame labels). ``num_classes``/``predict_per_item`` are
+        accepted for signature compatibility but unused. Augmentation is never
+        applied (inference only).
         """
+        assert partition == 'inference', (
+            f"ClsDataset only supports the 'inference' partition now, got {partition!r}. "
+            "Train/val/test use ContrastiveVideoDataset."
+        )
         self.prefix = prefix
-        self.partition = partition # train / val / test / inference
+        self.partition = partition
         self.predict_per_item = predict_per_item
         self.num_classes = num_classes
-        self.is_multilabel = None
         self.json_data = label_json_dict
-        
+
         self.resize_to = resize_to
         self.resize_style = resize_style
         self.parse_json(chunk_shift, chunk_length, chunk_step)
-        if do_aa and self.partition == "train":
-            self.aug = TrivialAugmentWide()
-        else:
-            self.aug = None
+        self.aug = None  # no augmentation at inference
 
         self.norm = torchvision.transforms.v2.Normalize((0.485, 0.456, 0.406), (0.229, 0.224, 0.225)) # vjepa
         self.scale = 0.00392156862745098
 
-        if part_sample < 1.0 and partition == 'train':
-            if subsample_keep_rare_threshold is None: # randomly samples chunks
-                logger.info("%s using %.2f%% of chunks", partition, 100 * part_sample)
-                new_len = round(part_sample * len(self.samples))
-                new_indexes = random.sample(list(range(len(self.samples))), new_len)
-                self.samples = [self.samples[i] for i in new_indexes]
-                self.labels = [self.labels[i] for i in new_indexes]
-            else: 
-                # keeps all chunks with a rare class and fills rest with randomly chosen "common" chunks
-                all_labels = np.array(self.labels)
-                flat_labels = all_labels.reshape(-1) if not self.is_multilabel else all_labels.reshape(-1, all_labels.shape[-1])
-                class_freqs = get_class_frequencies(flat_labels, num_classes=self.num_classes)
-                rare_classes = np.where(class_freqs < subsample_keep_rare_threshold)[0]
-                logger.info("Rare class indexes (<%.2f%%): %s. Class frequencies: %s",
-                            subsample_keep_rare_threshold * 100, rare_classes.tolist(), class_freqs)
-                
-                # Vectorized: find which chunks contain any rare class
-                if self.is_multilabel:
-                    has_rare = all_labels[:, :, rare_classes].any(axis=(1, 2))
-                else:
-                    has_rare = np.isin(all_labels, rare_classes).any(axis=1)
-                
-                # Keep all rare, sample from common to reach target
-                rare_idx = np.where(has_rare)[0]
-                common_idx = np.where(~has_rare)[0]
-                expected_total = round(part_sample * len(self.samples))
-                assert len(rare_idx) <= expected_total, f"Found {len(rare_idx)} rare chunks, more than the expected total {expected_total}"
-                
-                sampled_common = np.random.choice(common_idx, expected_total - len(rare_idx), replace=False)
-                final_idx = np.concatenate([rare_idx, sampled_common])
-                np.random.shuffle(final_idx)
-                logger.info("%s keeping %d rare + %d common = %d chunks",
-                            partition, len(rare_idx), len(sampled_common), len(final_idx))
-                self.samples = [self.samples[i] for i in final_idx]
-                self.labels = [self.labels[i] for i in final_idx]
-
-        if partition != 'inference':
-            # sanity-checks dataset composition
-            concat_labels = np.array(self.labels)
-            if self.is_multilabel:
-                cls_cnts = concat_labels.sum(axis=(0, 1))
-            else:
-                cls_cnts = np.bincount(concat_labels.flatten())
-            logger.info("%s class counts: %s", partition, cls_cnts)
-
-
     def parse_json(self, chunk_shift, chunk_length, chunk_step):
-        """Populate ``self.samples`` and ``self.labels`` from the label JSON.
+        """Populate ``self.samples`` with ``(filename, frames)`` chunks.
 
-        For each video in the partition, splits it into chunks of frame indices
-        and stores ``(filename, frames)`` samples (plus per-frame labels for
-        non-inference partitions). Also computes the shared decode size from the
-        first video and sets ``self.is_multilabel``. Asserts the label frame
-        count matches the video frame count for non-inference partitions.
+        For each video in the inference split, splits it into chunks of frame
+        indices. Also computes the shared decode size from the first video.
         """
         self.samples = []
-        self.labels = []
         self.decode_size = None
 
         for fn in self.json_data['splits'][self.partition]:
@@ -195,27 +146,9 @@ class ClsDataset():
             if self.decode_size is None:
                 orig_w, orig_h = get_video_dims(pth)
                 self.decode_size = compute_decode_size(orig_w, orig_h, self.resize_to, self.resize_style)
-            if self.partition != 'inference':
-                # checks that video frame count matches label frame count
-                json_total_frames = len(self.json_data['labels'][fn])
-                assert json_total_frames == video_total_frames, f"Bad json for video {fn}. Video has {video_total_frames} frames, labels have {json_total_frames} frames"
             frame_ids = get_frame_ids(video_total_frames, chunk_shift, chunk_length, chunk_step)
             for frames in frame_ids:
                 self.samples.append((fn, frames))
-                if self.partition != 'inference':
-                    self.labels.append(
-                        [self.json_data['labels'][fn][i] for i in frames]
-                    )
-        if self.partition != 'inference':
-            self.is_multilabel = False if len(torch.tensor(self.labels[0]).shape) == 1 else True
-
-    def proc_target(self, target):
-        """Convert a chunk's labels to a float tensor, one-hot encoding single-label targets."""
-        target = torch.tensor(target).long()
-        if len(target.shape) == 1:
-            target = one_hot(target, self.num_classes) # one-hot encoding: text to binary numerical arrays
-        target = target.float() 
-        return target
 
     def get_video(self, i):
         """Decode the i-th chunk's frames and return ``(video, names)``.
@@ -226,27 +159,14 @@ class ClsDataset():
         fn, frames = self.samples[i]
         pth = os.path.join(self.prefix, fn)
         w, h = self.decode_size
-        # names are (filename as in labels.json, index of a frame within the video, index of a frame within a chunk)
+        # names are (filename, index of a frame within the video, index of a frame within a chunk)
         return read_range_video_decord(pth, frames, width=w, height=h), [(fn, frames[i], i) for i in range(len(frames))]
 
     def get_item_simple(self, index):
-        """Load, augment, scale and normalize a chunk for the given index.
-
-        Returns ``(video, label)`` for train, ``(video, label, names)`` for
-        val/test, and ``(video, names)`` for inference.
-        """
+        """Load, scale and normalize a chunk; return ``(video, names)``."""
         video, names = self.get_video(index)
-        video = video if self.aug is None else self.aug(video)
         outputs = self.norm(video * self.scale)
-        if self.partition != "inference":
-            label = self.labels[index]
-            label = self.proc_target(label)
-        if self.partition == 'train':
-            return outputs, label
-        elif self.partition == "val" or self.partition == 'test':
-            return outputs, label, names
-        else:
-            return outputs, names
+        return outputs, names
 
     def __getitem__(self, index):
         """Return the chunk at ``index``, retrying up to 3 random indices on failure."""
@@ -426,13 +346,6 @@ class ContrastiveVideoDataset():
 
     def __len__(self):
         return len(self.samples)
-
-def collate_fn_val(batch):
-    """Collate ``(tensor, target, names)`` items, stacking tensors and targets."""
-    tensors, targets, names = zip(*batch)
-    tensors = torch.stack(tensors)
-    targets = torch.stack(targets)
-    return tensors, targets, names
 
 def collate_fn_inference(batch):
     """Collate ``(tensor, names)`` items, stacking tensors into a batch."""

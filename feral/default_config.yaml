@@ -2,44 +2,36 @@ run_name: new_run
 backbone: vjepa2_vitl_diving48
 predict_per_item: 64
 model:
-  fc_drop_rate: 0.5
-  class_weights: inv_freq_sqrt
   freeze_encoder_layers: 12
   gradient_checkpointing: false   # activation checkpointing: ~25-30% slower, big VRAM cut (fits ViT-L in ~9GB bs4). V-JEPA 2 / 2.1 only; errors on VideoPrism.
-  max_class_weight: null   # cap inverse-frequency class/pos weights (null = no cap; e.g. 20 for rare classes)
 data:
+  splits_file: null        # optional JSON listing video filenames per partition (train/val/test/inference), no labels. null = auto-split the folder.
+  split_ratios: [0.9, 0.05, 0.05]   # train/val/test fractions used when splits_file is null
   chunk_length: 64
   chunk_shift: 32
   chunk_step: 1
-  eval_chunk_shift: null   # stride between chunks for val/test/inference only (null = reuse chunk_shift). Lets eval/inference run a denser overlap than training, e.g. max preset trains at 66% but evaluates at 80%.
-  eval_smoothing_window: null   # N-frame moving average over the ensembled per-frame probabilities at val/test/inference (null or 1 = off). Applied per class and per video; windows never cross a video boundary.
+  eval_chunk_shift: null   # stride between chunks for the inference partition only (null = reuse chunk_shift). Lets embedding extraction run a denser overlap than training.
   resize_to: 256
   resize_style: square
   do_aa: true
-  part_sample: 1.0
-  subsample_keep_rare_threshold: null
+  embedding_pool: mean     # how per-frame features are pooled into one vector per chunk at inference ('mean' or 'none')
 training:
-  epochs: 10
+  epochs: 10               # number of contrastive training epochs
   train_bs: 4
   val_bs: 8
   num_workers: -1   # -1 = auto: min(16, CPUs available to the process); 0 = main process; or pin a positive int
   part_warmup: 0.2
   lr: 4.0e-5
   weight_decay: 0.1
-  label_smoothing: 0.1
   compile: true
   patience: null
-  grad_clip_norm: null     # global grad-norm clip (null = off; e.g. 1.0 to stabilize rare-class runs)
+  grad_clip_norm: null     # global grad-norm clip (null = off; e.g. 1.0 to stabilize runs)
   log_grad_norm: true      # log global grad-norm every step even when not clipping (cheap)
-  heavy_log_every: null    # if set (e.g. 200), every N steps log per-layer grad/weight-norm + per-element loss histograms
-  contrastive_num_samples: 1000
-  contrastive_epochs: 0        # 0 = off; >0 runs the self-supervised pretraining phase, clean up 
-  contrastive_lr: 4.0e-5       # phase-1 learning rate (defaults to `lr` if omitted)
-  contrastive_margin: 1.0      # triplet hinge margin (passed to contrastive_step)
-mixup_alpha: 0.8
-ema_decay: null
+  contrastive_num_samples: 500       # triplets sampled per training epoch
+  contrastive_val_num_samples: 100    # triplets sampled for each val/test evaluation
+  contrastive_lr: 4.0e-5   # training learning rate (defaults to `lr` if omitted)
+  contrastive_margin: 1.0  # triplet hinge margin (passed to contrastive_step)
 seed: 0
 device: "cuda"
 starting_checkpoint: null
 max_batches: null
-multilabel_threshold: 0.85

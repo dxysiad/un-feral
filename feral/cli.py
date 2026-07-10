@@ -18,7 +18,7 @@ def _load_default_config():
 # ── train ────────────────────────────────────────────────────────────────────
 
 def _cmd_train(args):
-    """Run the interactive `feral train` command: build cfg from the default config plus CLI args, optionally apply a --mode preset, configure W&B logging (interactively open/personal/skip, or non-interactively via --no-wandb / --public-wandb), then call train.main(cfg)."""
+    """Run the interactive `feral train` command: build cfg from the default config plus CLI args, optionally apply a --mode preset, configure W&B logging (interactively open/personal/skip, or non-interactively via --no-wandb / --public-wandb), then call train.main(cfg) for unsupervised contrastive training."""
     from urllib.parse import urlparse
     import wandb
     from feral.train import main as train_main
@@ -30,7 +30,7 @@ def _cmd_train(args):
         cfg = apply_mode(cfg, args.mode)
         print(f"Using --mode {args.mode}: {MODE_HELP[args.mode]}")
     cfg['data']['prefix'] = args.video_folder
-    cfg['data']['label_json'] = args.label_json_path
+    cfg['data']['splits_file'] = args.splits
     cfg['run_name'] = get_random_run_name()
 
     if args.resolution is not None:
@@ -38,14 +38,10 @@ def _cmd_train(args):
         print(f"Using --resolution {args.resolution} (square input)")
     if args.checkpoint is not None:
         cfg['starting_checkpoint'] = args.checkpoint
-    if args.part_subsample is not None:
-        cfg['data']['part_sample'] = args.part_subsample
-    if args.subsample_keep_rare_threshold is not None:
-        cfg['data']['subsample_keep_rare_threshold'] = args.subsample_keep_rare_threshold
     if args.gradient_checkpointing:
         cfg['model']['gradient_checkpointing'] = True
-    if args.contrastive_epochs is not None:
-        cfg['training']['contrastive_epochs'] = args.contrastive_epochs
+    if args.epochs is not None:
+        cfg['training']['epochs'] = args.epochs
 
     SHARED_WANDB_KEY = "dde17687b4b84ba8171dfede64d865243be41a0e"
     SHARED_WANDB_ENTITY = "sposiboh"
@@ -202,14 +198,17 @@ def main():
     subparsers = parser.add_subparsers(dest='command', required=True)
 
     # feral train
-    p_train = subparsers.add_parser('train', help='Run interactive training pipeline')
+    p_train = subparsers.add_parser('train', help='Run unsupervised contrastive training pipeline')
     p_train.add_argument('video_folder', help='Path to the folder containing training videos')
-    p_train.add_argument('label_json_path', help='Path to the label JSON file')
+    p_train.add_argument('--splits', default=None,
+                         help='Optional JSON listing video filenames per partition '
+                              '({"train":[...], "val":[...], "test":[...], "inference":[...]}, no labels). '
+                              'If omitted, the video folder is auto-split by split_ratios.')
     p_train.add_argument('--mode', choices=['lite', 'max', 'rare'], default=None,
                          help='Preset recipe overlay: '
                               'lite (smallest V-JEPA 2.1, full fine-tune, cheapest); '
-                              'max (default backbone, 66%% train / 80%% eval overlap + 9-frame smoothing + EMA, best accuracy); '
-                              'rare (rare-class robustness: EMA & mixup off + grad-clip + class-weight cap)')
+                              'max (default backbone, 66%% train / 80%% eval overlap); '
+                              'rare (lite backbone + grad-clip stabilization)')
     p_train.add_argument('--resolution', type=int, default=None,
                          help='Square input resolution for training (e.g. 512). Overrides the '
                               'backbone-native default; V-JEPA interpolates positional embeddings.')
@@ -219,16 +218,11 @@ def main():
                          help='Log to the shared public W&B account non-interactively (skips the prompt; public).')
     p_train.add_argument('--checkpoint', '-c', default=None,
                          help='Path to a checkpoint to resume from')
-    p_train.add_argument('--part_subsample', type=float, default=None,
-                         help='Fraction (0-1) of training samples to keep')
-    p_train.add_argument('--subsample_keep_rare_threshold', type=float, default=None,
-                         help='Keep all chunks with rare behaviors below this frequency threshold')
+    p_train.add_argument('--epochs', type=int, default=None,
+                         help='Number of contrastive training epochs (overrides the config).')
     p_train.add_argument('--gradient-checkpointing', action='store_true',
                          help='Enable activation/gradient checkpointing to cut VRAM (~25-30%% slower; '
                               'fits V-JEPA ViT-L in ~9GB at bs4). Not supported for VideoPrism.')
-    p_train.add_argument('--contrastive-epochs', type=int, default=None,
-                         help='Run N epochs of self-supervised contrastive pretraining before '
-                              'classification (requires a "contrastive" split in the label JSON).')
     p_train.set_defaults(func=_cmd_train)
 
     # feral train-config
@@ -237,17 +231,17 @@ def main():
     p_train_cfg.set_defaults(func=_cmd_train_config)
 
     # feral infer
-    p_infer = subparsers.add_parser('infer', help='Run inference on a folder of videos')
+    p_infer = subparsers.add_parser('infer', help='Extract per-chunk embeddings for a folder of videos')
     p_infer.add_argument('checkpoint', help='Path to a model checkpoint')
     p_infer.add_argument('video_folder', help='Path to folder containing videos')
     p_infer.add_argument('--output', '-o', default=None,
-                         help='Output JSON path (default: inference_<folder_name>.json)')
+                         help='Output .npz path (default: embeddings_<folder_name>.npz)')
     p_infer.add_argument('--batch_size', '-b', type=int, default=8, help='Batch size (default: 8)')
     p_infer.add_argument('--num_workers', '-w', type=int, default=4, help='DataLoader workers (default: 4)')
     p_infer.add_argument('--compile', action='store_true', help='Compile model with torch.compile')
     p_infer.add_argument('--mode', choices=['lite', 'max'], default=None,
                          help='Inference overlap preset (model size is fixed by the checkpoint): '
-                              'lite (50%% chunk overlap, faster); max (80%% overlap + 9-frame smoothing, smoother labels, slower).')
+                              'lite (50%% chunk overlap, faster); max (80%% overlap, denser embeddings, slower).')
     p_infer.add_argument('--resolution', type=int, default=None,
                          help='Override the square input resolution at inference (default: as trained, '
                               'read from the checkpoint).')
@@ -271,17 +265,12 @@ def main():
     if args.command == 'train':
         if not os.path.isdir(args.video_folder):
             parser.error(f"Video folder is not a directory: {args.video_folder}")
-        if not os.path.isfile(args.label_json_path):
-            parser.error(f"Label JSON path is not a file: {args.label_json_path}")
+        if args.splits is not None and not os.path.isfile(args.splits):
+            parser.error(f"Splits file is not a file: {args.splits}")
         if args.checkpoint is not None and not os.path.isfile(args.checkpoint):
             parser.error(f"Checkpoint path is not a file: {args.checkpoint}")
-        if args.part_subsample is not None and not (0.0 <= args.part_subsample <= 1.0):
-            parser.error(f"--part_subsample must be between 0 and 1, got {args.part_subsample}")
-        if args.subsample_keep_rare_threshold is not None:
-            if args.part_subsample is None:
-                parser.error("--subsample_keep_rare_threshold requires --part_subsample to be set")
-            if not (0.0 <= args.subsample_keep_rare_threshold <= 1.0):
-                parser.error(f"--subsample_keep_rare_threshold must be between 0 and 1, got {args.subsample_keep_rare_threshold}")
+        if args.epochs is not None and args.epochs < 1:
+            parser.error(f"--epochs must be >= 1, got {args.epochs}")
 
     if args.command == 'infer':
         if not os.path.isfile(args.checkpoint):

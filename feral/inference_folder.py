@@ -1,21 +1,13 @@
-"""Run inference on all videos in a folder using a saved checkpoint."""
+"""Extract per-chunk embeddings for all videos in a folder using a saved checkpoint."""
 import importlib.resources
-import json
 import logging
 import os
 
 import torch
 import yaml
-from torch.utils.data import DataLoader
 
 _DEFAULT_CONFIG = importlib.resources.files("feral").joinpath("default_config.yaml")
 
-from feral.dataset import (
-    ClsDataset,
-    collate_fn_inference,
-)
-from feral.loops import run_inference
-from feral.metrics import save_inference_results
 from feral.modeling import load_model_from_checkpoint
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s: %(message)s",
@@ -39,16 +31,9 @@ def find_videos(folder):
     return videos
 
 
-def build_inference_labels_json(video_filenames, class_names, is_multilabel):
-    """Build a minimal labels_json-like dict just for inference (no actual labels needed)."""
-    return {
-        'class_names': class_names,
-        'is_multilabel': is_multilabel,
-        'labels': {},
-        'splits': {
-            'inference': video_filenames,
-        },
-    }
+def build_inference_labels_json(video_filenames):
+    """Build a minimal splits-only dict for the inference chunk enumerator (no labels)."""
+    return {'splits': {'inference': list(video_filenames)}}
 
 
 def _load_default_cfg():
@@ -61,18 +46,16 @@ def _load_default_cfg():
 def run_inference_folder(checkpoint_path, video_folder, output=None,
                          batch_size=8, num_workers=4, compile=False,
                          mode=None, resolution=None):
-    """Run inference on every video in video_folder using a saved checkpoint and write results to JSON.
+    """Extract per-chunk embeddings for every video in video_folder and save an .npz.
 
     Reads the training cfg embedded in the checkpoint (falling back to
     default_config.yaml for legacy checkpoints), applies optional inference-time
     overrides (compile, mode -> chunk_shift, resolution -> resize_to), loads the
-    model and its class metadata, builds a chunk dataset/loader, runs inference,
-    and saves results to `output` (defaults to inference_<folder>.json).
+    encoder, taps ``forward_features`` over every chunk, and writes an ``.npz``
+    with ``emb`` (N, D), ``files`` (N,), ``starts`` (N,) to ``output`` (defaults
+    to embeddings_<folder>.npz).
     """
     # Peek at the checkpoint to grab the training cfg (saved since v0.2.1).
-    # Falling back to default_config only covers legacy checkpoints where the
-    # cfg wasn't persisted — the data/model params in default_config may not
-    # match how the model was actually trained.
     raw = torch.load(checkpoint_path, map_location="cpu")
     stored_cfg = raw.get('cfg') if isinstance(raw, dict) else None
     if stored_cfg is not None:
@@ -88,90 +71,51 @@ def run_inference_folder(checkpoint_path, video_folder, output=None,
 
     cfg['training']['compile'] = compile
 
-    # Inference uses the eval-time chunk overlap (eval_chunk_shift) and per-frame
-    # smoothing (eval_smoothing_window) the checkpoint was configured with, so a
-    # plain `feral infer` matches how the model is evaluated. Both fall back to
-    # "off" (chunk_shift / no smoothing) when the cfg doesn't define them.
+    # Embedding extraction uses the eval-time chunk overlap (eval_chunk_shift) the
+    # checkpoint was configured with, falling back to the training chunk_shift.
     eval_chunk_shift = cfg['data'].get('eval_chunk_shift')
     if eval_chunk_shift is not None:
         logger.info("eval_chunk_shift: chunk_shift %s -> %s (%.0f%% overlap)",
                     cfg['data']['chunk_shift'], eval_chunk_shift,
                     100 * (1 - eval_chunk_shift / cfg['data']['chunk_length']))
         cfg['data']['chunk_shift'] = eval_chunk_shift
-    smoothing_window = cfg['data'].get('eval_smoothing_window')
 
     # Inference-time overrides. Backbone/model size is fixed by the checkpoint
-    # weights and is never changed here; only chunk overlap (stride), per-frame
-    # smoothing, and input resolution can be safely overridden at predict time.
+    # weights and is never changed here; only chunk overlap and input resolution
+    # can be safely overridden at predict time.
     if mode is not None:
-        from feral.presets import infer_chunk_shift, infer_smoothing_window
+        from feral.presets import infer_chunk_shift
         new_shift = infer_chunk_shift(mode, cfg['data']['chunk_length'])
         if new_shift is not None:
             logger.info("--mode %s: chunk_shift %s -> %s (%.0f%% overlap)",
                         mode, cfg['data']['chunk_shift'], new_shift,
                         100 * (1 - new_shift / cfg['data']['chunk_length']))
             cfg['data']['chunk_shift'] = new_shift
-        new_smoothing = infer_smoothing_window(mode)
-        logger.info("--mode %s: eval_smoothing_window %s -> %s",
-                    mode, smoothing_window, new_smoothing)
-        smoothing_window = new_smoothing
     if resolution is not None:
         logger.info("--resolution %s: resize_to %s -> %s",
                     resolution, cfg['data']['resize_to'], resolution)
         cfg['data']['resize_to'] = resolution
     device = 'cuda'
-    video_filenames = find_videos(video_folder)
 
-    # Load model and extract metadata
-    model, metadata = load_model_from_checkpoint(cfg, device, checkpoint_path)
-    if metadata is None:
-        raise SystemExit(
-            "This checkpoint is in the legacy format (bare state_dict) and does not "
-            "contain class_names or is_multilabel. Please use a checkpoint saved with "
-            "the new format, or provide a labels.json and use the full training pipeline."
-        )
-    class_names = metadata['class_names']
-    is_multilabel = metadata['is_multilabel']
-    num_classes = len(class_names)
+    # Imported lazily to avoid a circular import (embeddings imports find_videos
+    # from this module at import time).
+    from feral.embeddings import extract_embeddings_folder
 
-    logger.info("Checkpoint metadata: %d classes, is_multilabel=%s", num_classes, is_multilabel)
-    logger.info("Classes: %s", class_names)
-
-    # Build a minimal labels_json for the dataset
-    labels_json = build_inference_labels_json(video_filenames, class_names, is_multilabel)
-
-    dataset = ClsDataset(
-        partition='inference',
-        label_json_dict=labels_json,
-        do_aa=False,
-        predict_per_item=cfg['predict_per_item'],
-        num_classes=num_classes,
-        prefix=video_folder,
-        resize_to=cfg['data']['resize_to'],
-        resize_style=cfg['data'].get('resize_style', 'square'),
-        chunk_shift=cfg['data']['chunk_shift'],
-        chunk_length=cfg['data']['chunk_length'],
-        chunk_step=cfg['data']['chunk_step'],
-    )
-
-    loader = DataLoader(
-        dataset,
-        batch_size=batch_size,
-        shuffle=False,
-        num_workers=num_workers,
-        collate_fn=collate_fn_inference,
-    )
-
-    logger.info("Running inference on %d chunks...", len(dataset))
-    answers = run_inference(model, loader, is_multilabel=is_multilabel, device=device)
+    model, _metadata = load_model_from_checkpoint(cfg, device, checkpoint_path)
 
     if output is None:
         folder_name = os.path.basename(os.path.normpath(video_folder))
-        output = f"inference_{folder_name}.json"
-
+        output = f"embeddings_{folder_name}.npz"
     os.makedirs(os.path.dirname(output) or '.', exist_ok=True)
-    save_inference_results(answers, [], video_folder, labels_json, output, smoothing_window=smoothing_window)
-    logger.info("Results saved to %s", output)
+
+    emb, ids = extract_embeddings_folder(
+        model, cfg, video_folder,
+        batch_size=batch_size, num_workers=num_workers,
+        pool=cfg['data'].get('embedding_pool', 'mean'),
+        save_path=output,
+    )
+    logger.info("Saved %d embeddings (dim %s) to %s", emb.shape[0], tuple(emb.shape[1:]), output)
+    return emb, ids
 
 
 if __name__ == '__main__':

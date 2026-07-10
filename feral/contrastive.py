@@ -1,9 +1,9 @@
 """Contrastive (self-supervised) objectives over FeralModel feature vectors.
 
-Standalone helpers used to pretrain the encoder on triplets from
-``ContrastiveVideoDataset`` ({vid1, vid2, vid3}). Kept independent of the
-labeled classification path (``train.py`` / ``loops.py`` / ``build_training_objects``)
-so it can be driven from a notebook or a future contrastive training loop.
+Standalone helpers used to train the encoder on triplets from
+``ContrastiveVideoDataset`` ({vid1, vid2, vid3}). Parameter-free and independent
+of the training loop, so they can be driven from ``loops.train_contrastive_epoch``
+or directly from a notebook.
 """
 import torch
 import torch.nn.functional as F
