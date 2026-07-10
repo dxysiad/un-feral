@@ -52,7 +52,7 @@ def extract_embeddings_folder(model, cfg, video_folder, *, batch_size=8,
     are passed. Optionally writes an ``.npz`` (emb, files, starts) to ``save_path``.
     """
     video_filenames = find_videos(video_folder)
-    labels_json = build_inference_labels_json(video_filenames, class_names=[], is_multilabel=False)
+    labels_json = build_inference_labels_json(video_filenames)
     dataset = ClsDataset(
         partition='inference', label_json_dict=labels_json, do_aa=False,
         predict_per_item=cfg['predict_per_item'], num_classes=1, prefix=video_folder,
