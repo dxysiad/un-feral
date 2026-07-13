@@ -168,6 +168,187 @@ def plot_contingency(labels, gt_labels, *, class_names=None, normalize="cluster"
     return fig
 
 
+def clusters_as_classifier(labels, gt_labels):
+    """Turn an over-clustering into a behavior classifier by majority vote.
+
+    Each cluster (including noise ``-1``) is mapped to its most common
+    ground-truth class, then every chunk is relabeled with its cluster's class.
+    This is the fair way to score many-clusters-vs-few-classes (Hungarian would
+    cap you at one cluster per class). Returns ``(y_pred, mapping)``.
+    """
+    labels = np.asarray([int(l) for l in labels])
+    gt = np.asarray([int(g) for g in gt_labels])
+    mapping = {}
+    for c in set(labels.tolist()):
+        vals, cnts = np.unique(gt[labels == c], return_counts=True)
+        mapping[c] = int(vals[cnts.argmax()])
+    y_pred = np.array([mapping[int(c)] for c in labels])
+    return y_pred, mapping
+
+
+def linear_probe(emb, gt_labels, *, groups=None, n_splits=5, seed=0,
+                 class_names=None):
+    """Cross-validated linear probe: how linearly decodable the labels are.
+
+    Standardize -> balanced logistic regression, scored out-of-fold. Pass
+    ``groups`` (e.g. the video id per chunk) to use GroupKFold so overlapping
+    chunks from the same video never straddle train/test — the honest setting
+    for temporally autocorrelated clips; otherwise stratified k-fold. Returns a
+    dict: balanced_accuracy, macro_f1, per_class_f1, and out-of-fold y_true/y_pred.
+    """
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.pipeline import make_pipeline
+    from sklearn.model_selection import GroupKFold, StratifiedKFold
+    from sklearn.metrics import balanced_accuracy_score, f1_score
+
+    X = _to_numpy(emb)
+    y = np.asarray([int(g) for g in gt_labels])
+    if groups is not None:
+        splits = GroupKFold(n_splits=n_splits).split(X, y, np.asarray(groups))
+    else:
+        splits = StratifiedKFold(n_splits=n_splits, shuffle=True,
+                                 random_state=seed).split(X, y)
+
+    y_true = np.full(len(y), -1)
+    y_pred = np.full(len(y), -1)
+    for tr, te in splits:
+        clf = make_pipeline(
+            StandardScaler(),
+            LogisticRegression(max_iter=2000, class_weight="balanced"),
+        )
+        clf.fit(X[tr], y[tr])
+        y_pred[te] = clf.predict(X[te])
+        y_true[te] = y[te]
+
+    classes = sorted(set(y.tolist()))
+    per = f1_score(y_true, y_pred, labels=classes, average=None, zero_division=0)
+    return {
+        "balanced_accuracy": float(balanced_accuracy_score(y_true, y_pred)),
+        "macro_f1": float(f1_score(y_true, y_pred, average="macro", zero_division=0)),
+        "per_class_f1": {(class_names.get(c, c) if class_names else c): float(f)
+                         for c, f in zip(classes, per)},
+        "y_true": y_true,
+        "y_pred": y_pred,
+    }
+
+
+def plot_confusion(y_true, y_pred, *, class_names=None, normalize="true",
+                   cmap="Blues", figsize=None, title="Confusion matrix"):
+    """Confusion-matrix heatmap (rows = ground truth, cols = prediction).
+
+    normalize='true' -> per-row recall (default), None -> raw counts. The title
+    is annotated with balanced accuracy (mean per-class recall, imbalance-robust).
+    Returns a matplotlib Figure.
+    """
+    from sklearn.metrics import confusion_matrix, balanced_accuracy_score
+    y_true = np.asarray([int(v) for v in y_true])
+    y_pred = np.asarray([int(v) for v in y_pred])
+    classes = sorted(set(y_true.tolist()) | set(y_pred.tolist()))
+    cm = confusion_matrix(y_true, y_pred, labels=classes).astype(float)
+    disp = cm / cm.sum(1, keepdims=True).clip(min=1) if normalize == "true" else cm
+
+    names = [str(class_names.get(c, c)) if class_names else str(c) for c in classes]
+    fig, ax = plt.subplots(figsize=figsize or (1.1 * len(classes) + 2,
+                                               1.1 * len(classes) + 1.5))
+    im = ax.imshow(disp, cmap=cmap, vmin=0, vmax=disp.max() if disp.max() > 0 else 1)
+    ax.set_xticks(range(len(classes)))
+    ax.set_xticklabels(names, rotation=45, ha="right")
+    ax.set_yticks(range(len(classes)))
+    ax.set_yticklabels(names)
+    ax.set_xlabel("predicted")
+    ax.set_ylabel("ground truth")
+    thr = disp.max() * 0.6 if disp.max() > 0 else 0.5
+    for i in range(len(classes)):
+        for j in range(len(classes)):
+            txt = f"{disp[i, j]:.2f}" if normalize else str(int(cm[i, j]))
+            ax.text(j, i, txt, ha="center", va="center", fontsize=8,
+                    color="white" if disp[i, j] > thr else "black")
+    bal = balanced_accuracy_score(y_true, y_pred)
+    ax.set_title(f"{title}  (balanced acc {bal:.2f})")
+    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    fig.tight_layout()
+    return fig
+
+
+def balanced_subsample(labels, cap, *, seed=0):
+    """Indices that cap each label at ``cap`` samples (labels with fewer are kept
+    whole). Use to stop a dominant class from drowning density-based clustering."""
+    rng = np.random.default_rng(seed)
+    labels = np.asarray([int(l) for l in labels])
+    idx = []
+    for c in sorted(set(labels.tolist())):
+        ci = np.where(labels == c)[0]
+        if len(ci) > cap:
+            ci = rng.choice(ci, cap, replace=False)
+        idx.append(ci)
+    idx = np.concatenate(idx)
+    idx.sort()
+    return idx
+
+
+def sweep_min_cluster_size(emb, gt_labels, sizes, *, cluster_dim=10, n_neighbors=15,
+                           min_dist=0.0, seed=0):
+    """UMAP-reduce once, then run HDBSCAN at each ``min_cluster_size`` and score vs GT.
+
+    Returns a list of dicts (one per size): min_cluster_size, n_clusters,
+    noise_frac, ari, nmi, purity, balanced_accuracy (clusters -> majority class).
+    The UMAP embedding is computed a single time and reused, so the sweep is cheap.
+    """
+    import umap
+    from sklearn.cluster import HDBSCAN
+    from sklearn.metrics import balanced_accuracy_score
+
+    X = _to_numpy(emb)
+    gt = np.asarray([int(g) for g in gt_labels])
+    X_low = umap.UMAP(n_components=cluster_dim, n_neighbors=n_neighbors,
+                      min_dist=min_dist, random_state=seed).fit_transform(X)
+    rows = []
+    for s in sizes:
+        labels = HDBSCAN(min_cluster_size=int(s)).fit_predict(X_low)
+        y_pred, _ = clusters_as_classifier(labels, gt)
+        m = cluster_agreement(labels, gt)
+        rows.append({
+            "min_cluster_size": int(s),
+            "n_clusters": m["n_clusters"],
+            "noise_frac": m["n_noise"] / m["n"],
+            "ari": m["ari"],
+            "nmi": m["nmi"],
+            "purity": m["purity"],
+            "balanced_accuracy": float(balanced_accuracy_score(gt, y_pred)),
+        })
+    return rows
+
+
+def plot_sweep(rows, *, probe_balanced_accuracy=None, figsize=(8, 5)):
+    """Plot a ``sweep_min_cluster_size`` result: cluster balanced-acc, purity and
+    noise fraction vs. min_cluster_size (labels annotate the cluster count).
+    Pass ``probe_balanced_accuracy`` to draw the linear-probe ceiling. Returns a Figure.
+    """
+    sizes = [r["min_cluster_size"] for r in rows]
+    fig, ax = plt.subplots(figsize=figsize)
+    ax.plot(sizes, [r["balanced_accuracy"] for r in rows], "o-", label="cluster balanced acc")
+    ax.plot(sizes, [r["purity"] for r in rows], "s--", label="purity")
+    ax.plot(sizes, [r["noise_frac"] for r in rows], "^:", label="noise fraction")
+    if probe_balanced_accuracy is not None:
+        ax.axhline(probe_balanced_accuracy, color="k", ls="--", lw=1,
+                   label=f"linear probe ({probe_balanced_accuracy:.2f})")
+    ax.axhline(0.25, color="0.6", ls=":", lw=1, label="chance (0.25)")
+    for r in rows:
+        ax.annotate(str(r["n_clusters"]),
+                    (r["min_cluster_size"], r["balanced_accuracy"]),
+                    textcoords="offset points", xytext=(0, 6), fontsize=7, ha="center")
+    ax.set_xscale("log")
+    ax.set_xlabel("min_cluster_size")
+    ax.set_ylabel("score / fraction")
+    ax.set_ylim(0, 1)
+    ax.grid(alpha=0.3)
+    ax.legend(fontsize=8, loc="best")
+    ax.set_title("min_cluster_size sweep (annotations = # clusters)")
+    fig.tight_layout()
+    return fig
+
+
 def behavior_ethogram(ids, labels, *, cmap_name="tab20", figsize=None):
     """Per-chunk ethogram: one row per video, chunks in temporal order, colored
     by cluster id (``-1`` noise shown gray). Returns a matplotlib Figure.

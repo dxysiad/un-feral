@@ -277,7 +277,7 @@ class ContrastiveVideoDataset():
             # precompute shifted chunk to check vid3 against both
             prob = self.rng.random()
             if prob >= 0.5:
-                offset = self.rng.randint(-16, 16) # TODO: test different ranges (start w/ 16) / doesn't shift half of the time
+                offset = self.rng.randint(-16, 16)
             else:
                 offset = 0
             fn, frames = primary
@@ -287,22 +287,13 @@ class ContrastiveVideoDataset():
             other = self._random_chunk()
             max_tries = 20
             for _ in range(max_tries):
-                if not self._chunks_overlap(other, primary) and \
-                not self._chunks_overlap(other, shifted):
+                if not self._chunks_overlap(other, primary) and not self._chunks_overlap(other, shifted):
                     break
-                # TODO: May need to sample from another video if impossible
                 other = self._random_chunk()
             else:
                 logger.warning("Could not find non-overlapping vid3 after %d tries", max_tries)
             
             self.samples.append((primary, shifted, other))
-
-            """
-            # ensure vid3 is a genuinely different chunk (diff video or start)
-            while other[0] == primary[0] and other[1][0] == primary[1][0]:
-                other = self._random_chunk()
-            self.samples.append((primary, other))
-            """
 
     def _transform(self, video):
         """Augment (optional), scale to [0,1], and normalize a (T,C,H,W) chunk."""

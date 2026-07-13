@@ -6,7 +6,7 @@ model:
   gradient_checkpointing: false   # activation checkpointing: ~25-30% slower, big VRAM cut (fits ViT-L in ~9GB bs4). V-JEPA 2 / 2.1 only; errors on VideoPrism.
 data:
   splits_file: null        # optional JSON listing video filenames per partition (train/val/test/inference), no labels. null = auto-split the folder.
-  split_ratios: [0.9, 0.05, 0.05]   # train/val/test fractions used when splits_file is null
+  split_ratios: [1.0, 0.0, 0.0] #[0.9, 0.05, 0.05]   # train/val/test fractions used when splits_file is null
   chunk_length: 64
   chunk_shift: 32
   chunk_step: 1
@@ -27,8 +27,8 @@ training:
   patience: null
   grad_clip_norm: null     # global grad-norm clip (null = off; e.g. 1.0 to stabilize runs)
   log_grad_norm: true      # log global grad-norm every step even when not clipping (cheap)
-  contrastive_num_samples: 500       # triplets sampled per training epoch
-  contrastive_val_num_samples: 100    # triplets sampled for each val/test evaluation
+  contrastive_num_samples: 1000       # triplets sampled per training epoch
+  contrastive_val_num_samples: 200    # triplets sampled for each val/test evaluation
   contrastive_lr: 4.0e-5   # training learning rate (defaults to `lr` if omitted)
   contrastive_margin: 1.0  # triplet hinge margin (passed to contrastive_step)
 seed: 0
