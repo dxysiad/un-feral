@@ -95,7 +95,7 @@ def _cmd_train(args):
 # ── train-config ─────────────────────────────────────────────────────────────
 
 def _cmd_train_config(args):
-    """Run `feral train-config`: load cfg from the given YAML file, log in to W&B if a key is present, then call train.main(cfg)."""
+    """Run `feral train-config`: load cfg from the given YAML file, prompt for the W&B api_key if the config logs to W&B, then call train.main(cfg)."""
     import wandb
     from dotenv import load_dotenv
     from envyaml import EnvYAML
@@ -103,14 +103,11 @@ def _cmd_train_config(args):
     from feral.train import main as train_main
     from feral.utils import get_random_run_name
 
-    load_dotenv()
-    #config = EnvYAML('config.yaml')
-
     with open(args.config, 'r') as f:
         cfg = yaml.safe_load(f)
-    key = cfg.get('wandb', {}).get('key') if cfg.get('wandb') else None
-    if key:
-        #key = os.getenv("MY_API_KEY")
+    if cfg.get('wandb'):
+        cfg['wandb'].pop('key', None)
+        key = input('Paste your wandb api_key: ').strip()
         wandb.login(key=key)
     cfg['run_name'] = get_random_run_name()
     train_main(cfg)
