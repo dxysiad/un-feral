@@ -24,10 +24,29 @@ logger = logging.getLogger(__name__)
 torch.backends.cuda.enable_math_sdp(False)
 torch.backends.cuda.enable_mem_efficient_sdp(False)
 
-
 def _str_now():
     """Return the current local time as a filename-safe 'YYYY-MM-DD_HH-MM-SS' string."""
     return datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
+
+
+def resolve_output_dir(cfg, kind=None):
+    """Return the absolute results directory for ``kind`` ('answers', 'checkpoints', ...).
+
+    Results are rooted at ``cfg['output_dir']`` (default: the current directory, which
+    preserves the historical relative-path behaviour) so runs land in the same place
+    regardless of where the process was launched from. When ``cfg['dataset']`` is set,
+    results are nested one level deeper as ``<output_dir>/<kind>/<dataset>``. Creates
+    the directory if needed.
+    """
+    root = os.path.abspath(os.path.expanduser(cfg.get('output_dir') or '.'))
+    parts = [root]
+    if kind is not None:
+        parts.append(kind)
+        if cfg.get('dataset'):
+            parts.append(cfg['dataset'])
+    path = os.path.join(*parts)
+    os.makedirs(path, exist_ok=True)
+    return path
 
 
 def main(cfg):
@@ -41,8 +60,7 @@ def main(cfg):
     """
     check_environment(compile_enabled=cfg['training']['compile'])
 
-    os.makedirs("answers", exist_ok=True)
-    os.makedirs("checkpoints", exist_ok=True)
+    checkpoints_dir = resolve_output_dir(cfg, "checkpoints")
 
     torch.manual_seed(cfg['seed'])
     np.random.seed(cfg['seed'])
@@ -52,6 +70,7 @@ def main(cfg):
     wandb.init(
         project=cfg.get('wandb', {}).get('project'),
         config=cfg,
+        dir=resolve_output_dir(cfg),
         mode='disabled' if cfg.get('wandb') is None else 'online',
     )
 
@@ -77,7 +96,7 @@ def main(cfg):
         if wandb.run is not None:
             wandb.run.summary['n_params'] = sum(p.numel() for p in model.parameters())
 
-    best_checkpoint_path = os.path.join("checkpoints", f"{cfg['run_name']}_best_checkpoint.pt")
+    best_checkpoint_path = os.path.join(checkpoints_dir, f"{cfg['run_name']}_best_checkpoint.pt")
 
     if train_loader is not None:
         logger.info("Contrastive training for %d epochs (%d samples/epoch)",
@@ -158,7 +177,8 @@ def main(cfg):
             pool=cfg['data'].get('embedding_pool', 'mean'),
             max_batches=cfg.get('max_batches'),
         )
-        out_pth = os.path.join("answers", f"_embeddings_{cfg['run_name']}_{_str_now()}.npz")
+        out_pth = os.path.join(resolve_output_dir(cfg, "embeddings"),
+                               f"_embeddings_{cfg['run_name']}_{_str_now()}.npz")
         files = np.array([f for f, _ in ids])
         starts = np.array([s for _, s in ids])
         np.savez(out_pth, emb=emb.numpy(), files=files, starts=starts)

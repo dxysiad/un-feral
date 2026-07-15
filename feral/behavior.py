@@ -20,7 +20,7 @@ def _to_numpy(emb):
     return np.asarray(emb)
 
 
-def cluster_embeddings(emb, *, cluster_dim=10, min_cluster_size=25,
+def cluster_embeddings(emb, *, cluster_dim=10, min_cluster_size=50,
                        n_neighbors=15, min_dist=0.0, viz=True, seed=0):
     """UMAP-reduce then HDBSCAN-cluster clip embeddings (the B-SOID recipe).
 

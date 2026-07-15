@@ -1,6 +1,8 @@
 run_name: new_run
 backbone: vjepa2_vitl_diving48
 predict_per_item: 64
+output_dir: null         # root for results (checkpoints/, embeddings/, wandb/). null = current directory.
+dataset: null            # optional name nesting results one level deeper, e.g. checkpoints/<dataset>/
 model:
   freeze_encoder_layers: 12
   gradient_checkpointing: false   # activation checkpointing: ~25-30% slower, big VRAM cut (fits ViT-L in ~9GB bs4). V-JEPA 2 / 2.1 only; errors on VideoPrism.

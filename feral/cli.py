@@ -7,7 +7,6 @@ import yaml
 
 _DEFAULT_CONFIG = importlib.resources.files("feral").joinpath("default_config.yaml")
 
-
 def _load_default_config():
     """Load and return the packaged default_config.yaml as a dict."""
     with importlib.resources.as_file(_DEFAULT_CONFIG) as cfg_path:
@@ -98,13 +97,22 @@ def _cmd_train(args):
 def _cmd_train_config(args):
     """Run `feral train-config`: load cfg from the given YAML file, log in to W&B if a key is present, then call train.main(cfg)."""
     import wandb
+    from dotenv import load_dotenv
+    from envyaml import EnvYAML
+
     from feral.train import main as train_main
+    from feral.utils import get_random_run_name
+
+    load_dotenv()
+    #config = EnvYAML('config.yaml')
 
     with open(args.config, 'r') as f:
         cfg = yaml.safe_load(f)
     key = cfg.get('wandb', {}).get('key') if cfg.get('wandb') else None
     if key:
+        #key = os.getenv("MY_API_KEY")
         wandb.login(key=key)
+    cfg['run_name'] = get_random_run_name()
     train_main(cfg)
 
 

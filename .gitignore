@@ -220,3 +220,25 @@ notebooks/
 checkpoints/# pixi environments
 .pixi/*
 !.pixi/config.toml
+
+# bash scripts
+*.sh
+
+# config
+my_config.yaml
+
+# results
+checkpoints/
+.ipynb_checkpoints/
+embeddings/
+images/
+
+# visualization
+feral-viz/
+
+# tests with datasets
+feral_project
+
+# obsolete
+wandb_test.py
+scratch_contrastive_prototype.py
