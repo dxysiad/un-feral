@@ -1,8 +1,9 @@
 import torchvision
+import torchvision.transforms.v2
 import os
 from decord import VideoReader
 import torch
-from torchvision.transforms.v2 import TrivialAugmentWide
+import albumentations as A
 import numpy as np
 import cv2
 import traceback
@@ -11,14 +12,35 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+def read_range_video_decord_numpy(path, frames, width=-1, height=-1):
+    """Decode the given ``frames`` indices from a video, resizing at decode time.
+
+    Returns a uint8 array of shape (T, H, W, C) — albumentations' native layout.
+    """
+    vr = VideoReader(path, width=width, height=height)
+    return vr.get_batch(frames).asnumpy()
+
+
 def read_range_video_decord(path, frames, width=-1, height=-1):
     """Decode the given ``frames`` indices from a video, resizing at decode time.
 
     Returns a uint8 tensor of shape (T, C, H, W).
     """
-    vr = VideoReader(path, width=width, height=height)
-    video = vr.get_batch(frames).asnumpy()  # (T, H, W, C)
+    video = read_range_video_decord_numpy(path, frames, width=width, height=height)
     return torch.from_numpy(video).permute(0, 3, 1, 2)
+
+
+def build_contrastive_aug(out_h, out_w):
+    return A.Compose([
+        A.Affine(rotate=(-180, 180), border_mode=cv2.BORDER_REPLICATE, p=0.95), 
+        A.RandomResizedCrop(size=(out_h, out_w), scale=(0.7, 1.0), ratio=(0.9, 1.11), p=0.75),
+        A.HorizontalFlip(p=0.5),
+        A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=0.5),
+        A.ColorJitter(brightness=0.3, contrast=0.3, saturation=0.3, hue=0.1, p=0.75),
+        A.GaussianBlur(blur_limit=(3, 7), p=0.2),
+        A.GaussNoise(std_range=(0.1, 0.2), per_channel=False, p=0.2),
+        A.ToGray(p=0.2)
+    ])
 
 
 def compute_decode_size(orig_w, orig_h, resize_to, resize_style):
@@ -216,7 +238,6 @@ class ContrastiveVideoDataset():
         self.num_samples = num_samples
         self.rng = random.Random(seed)
 
-        self.aug = TrivialAugmentWide() if do_aa else None
         self.norm = torchvision.transforms.v2.Normalize(
             (0.485, 0.456, 0.406), (0.229, 0.224, 0.225))  # vjepa
         self.scale = 0.00392156862745098
@@ -242,6 +263,11 @@ class ContrastiveVideoDataset():
                 self.decode_size = compute_decode_size(w, h, resize_to, resize_style)
         if not self.usable_paths:
             raise ValueError("No videos long enough to form a chunk")
+        
+        # Built here, not above: the crop needs decode_size so augmented chunks
+        # keep the shape ClsDataset produces at inference.
+        dec_w, dec_h = self.decode_size
+        self.aug = build_contrastive_aug(dec_h, dec_w) if do_aa else None
 
         self.resample()
 
@@ -277,7 +303,7 @@ class ContrastiveVideoDataset():
             # precompute shifted chunk to check vid3 against both
             prob = self.rng.random()
             if prob >= 0.5:
-                offset = self.rng.randint(-16, 16)
+                offset = self.rng.randint(-8, 8)
             else:
                 offset = 0
             fn, frames = primary
@@ -296,15 +322,17 @@ class ContrastiveVideoDataset():
             self.samples.append((primary, shifted, other))
 
     def _transform(self, video):
-        """Augment (optional), scale to [0,1], and normalize a (T,C,H,W) chunk."""
+        """Augment (optional) a (T,H,W,C) uint8 chunk, then scale/normalize to (T,C,H,W)."""
         if self.aug is not None:
-            video = self.aug(video)
+            video = self.aug(images=video)['images']
+        video = torch.from_numpy(np.ascontiguousarray(video)).permute(0, 3, 1, 2)
         return self.norm(video * self.scale)
 
     def _decode(self, chunk):
+        """Decode a chunk to a (T,H,W,C) uint8 array — the layout `_transform` augments in."""
         fn, frames = chunk
         w, h = self.decode_size
-        return read_range_video_decord(os.path.join(self.prefix, fn), frames, width=w, height=h)
+        return read_range_video_decord_numpy(os.path.join(self.prefix, fn), frames, width=w, height=h)
 
     def get_item_simple(self, index):
         primary, shifted, other = self.samples[index]

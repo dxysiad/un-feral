@@ -97,8 +97,6 @@ def _cmd_train(args):
 def _cmd_train_config(args):
     """Run `feral train-config`: load cfg from the given YAML file, prompt for the W&B api_key if the config logs to W&B, then call train.main(cfg)."""
     import wandb
-    from dotenv import load_dotenv
-    from envyaml import EnvYAML
 
     from feral.train import main as train_main
     from feral.utils import get_random_run_name

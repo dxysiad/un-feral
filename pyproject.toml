@@ -27,6 +27,7 @@ dependencies = [
     "opencv-python==4.13.0.92",
     "matplotlib==3.10.8",
     "hf_transfer==0.1.9",
+    "albumentations==2.0.8",
 ]
 
 [project.urls]
@@ -52,6 +53,7 @@ torch = { version = "*", index = "https://download.pytorch.org/whl/cu128" }
 torchvision = { version = "*", index = "https://download.pytorch.org/whl/cu128" }
 torchaudio = { version = "*", index = "https://download.pytorch.org/whl/cu128" }
 umap-learn = ">=0.5"
+pytest = ">=9.1.1,<10"   # test-only; kept out of [project.dependencies] so it isn't a runtime dep of the published package
 
 [tool.pixi.tasks]
 
