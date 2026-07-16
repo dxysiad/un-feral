@@ -232,13 +232,13 @@ checkpoints/
 .ipynb_checkpoints/
 embeddings/
 images/
+nohup.out
 
 # visualization
-feral-viz/
+feral/feral-viz/data
 
-# tests with datasets
-feral_project
+# processed datasets
+processed_datasets
 
 # obsolete
-wandb_test.py
 scratch_contrastive_prototype.py
