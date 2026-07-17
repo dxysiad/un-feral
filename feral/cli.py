@@ -41,6 +41,8 @@ def _cmd_train(args):
         cfg['model']['gradient_checkpointing'] = True
     if args.epochs is not None:
         cfg['training']['epochs'] = args.epochs
+    if args.vid2_max_shift is not None:
+        cfg['data']['vid2_max_shift'] = args.vid2_max_shift
 
     SHARED_WANDB_KEY = "dde17687b4b84ba8171dfede64d865243be41a0e"
     SHARED_WANDB_ENTITY = "sposiboh"
@@ -215,6 +217,9 @@ def main():
     p_train.add_argument('--resolution', type=int, default=None,
                          help='Square input resolution for training (e.g. 512). Overrides the '
                               'backbone-native default; V-JEPA interpolates positional embeddings.')
+    p_train.add_argument('--vid2-max-shift', type=int, default=None,
+                         help='Max frames vid2 start is jittered from vid1 during contrastive '
+                              'training (default: 8; 0 disables the shift).')
     p_train.add_argument('--no-wandb', action='store_true',
                          help='Disable Weights & Biases logging non-interactively; metrics print to stdout only.')
     p_train.add_argument('--public-wandb', action='store_true',
@@ -274,6 +279,8 @@ def main():
             parser.error(f"Checkpoint path is not a file: {args.checkpoint}")
         if args.epochs is not None and args.epochs < 1:
             parser.error(f"--epochs must be >= 1, got {args.epochs}")
+        if args.vid2_max_shift is not None and args.vid2_max_shift < 0:
+            parser.error(f"--vid2-max-shift must be >= 0, got {args.vid2_max_shift}")
 
     if args.command == 'infer':
         if not os.path.isfile(args.checkpoint):

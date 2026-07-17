@@ -228,7 +228,7 @@ class ContrastiveVideoDataset():
 
     def __init__(self, video_paths, num_samples, chunk_length, chunk_step,
                  resize_to, resize_style="square", do_aa=True, prefix="",
-                 seed=None, **kwargs):
+                 seed=None, vid2_max_shift=8, **kwargs):
         self.prefix = prefix
         self.video_paths = list(video_paths)
         self.chunk_length = chunk_length
@@ -236,6 +236,7 @@ class ContrastiveVideoDataset():
         self.resize_to = resize_to
         self.resize_style = resize_style
         self.num_samples = num_samples
+        self.vid2_max_shift = vid2_max_shift
         self.rng = random.Random(seed)
 
         self.norm = torchvision.transforms.v2.Normalize(
@@ -303,7 +304,7 @@ class ContrastiveVideoDataset():
             # precompute shifted chunk to check vid3 against both
             prob = self.rng.random()
             if prob >= 0.5:
-                offset = self.rng.randint(-8, 8)
+                offset = self.rng.randint(-self.vid2_max_shift, self.vid2_max_shift)
             else:
                 offset = 0
             fn, frames = primary

@@ -229,16 +229,18 @@ my_config.yaml
 
 # results
 checkpoints/
-.ipynb_checkpoints/
 embeddings/
 images/
 nohup.out
 
 # visualization
-feral/feral-viz/data
+feral/feral-viz/
 
 # processed datasets
 processed_datasets
 
 # obsolete
 scratch_contrastive_prototype.py
+
+# claude
+.claude/
