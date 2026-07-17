@@ -24,7 +24,7 @@ dependencies = [
     "timm==1.0.26",
     "einops==0.8.2",
     "hf_xet==1.4.3",
-    "opencv-python==4.13.0.92",
+    "opencv-python-headless==5.0.0.93",   # headless: feral only uses VideoCapture/CAP_PROP_*/BORDER_REPLICATE (no GUI). albumentations also requires headless; pinning the full opencv-python here installed a second cv2 that clobbered this one.
     "matplotlib==3.10.8",
     "hf_transfer==0.1.9",
     "albumentations==2.0.8",
