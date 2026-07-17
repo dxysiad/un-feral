@@ -233,6 +233,60 @@ def linear_probe(emb, gt_labels, *, groups=None, n_splits=5, seed=0,
     }
 
 
+def decode_behavior(emb, gt_labels, *, groups=None, test_size=0.25, seed=0,
+                    class_names=None):
+    """Logistic-regression decoder: hold out a split and score decoding accuracy.
+
+    Standardize -> balanced multinomial logistic regression, fit on a training
+    split and scored on a held-out test split (a single split, unlike the
+    cross-validated ``linear_probe``). Pass ``groups`` (e.g. the video id per
+    chunk) to hold out whole videos via GroupShuffleSplit so temporally
+    autocorrelated chunks never straddle train/test — the honest setting;
+    otherwise a class-stratified split. Returns a dict: accuracy,
+    balanced_accuracy, macro_f1, per_class_f1, n_train/n_test, the held-out
+    y_true/y_pred, and the fitted ``clf``.
+    """
+    from sklearn.linear_model import LogisticRegression
+    from sklearn.preprocessing import StandardScaler
+    from sklearn.pipeline import make_pipeline
+    from sklearn.model_selection import StratifiedShuffleSplit, GroupShuffleSplit
+    from sklearn.metrics import accuracy_score, balanced_accuracy_score, f1_score
+
+    X = _to_numpy(emb)
+    y = np.asarray([int(g) for g in gt_labels])
+    if groups is not None:
+        splitter = GroupShuffleSplit(n_splits=1, test_size=test_size,
+                                     random_state=seed)
+        tr, te = next(splitter.split(X, y, np.asarray(groups)))
+    else:
+        splitter = StratifiedShuffleSplit(n_splits=1, test_size=test_size,
+                                          random_state=seed)
+        tr, te = next(splitter.split(X, y))
+
+    clf = make_pipeline(
+        StandardScaler(),
+        LogisticRegression(max_iter=2000, class_weight="balanced"),
+    )
+    clf.fit(X[tr], y[tr])
+    y_pred = clf.predict(X[te])
+    y_true = y[te]
+
+    classes = sorted(set(y.tolist()))
+    per = f1_score(y_true, y_pred, labels=classes, average=None, zero_division=0)
+    return {
+        "accuracy": float(accuracy_score(y_true, y_pred)),
+        "balanced_accuracy": float(balanced_accuracy_score(y_true, y_pred)),
+        "macro_f1": float(f1_score(y_true, y_pred, average="macro", zero_division=0)),
+        "per_class_f1": {(class_names.get(c, c) if class_names else c): float(f)
+                         for c, f in zip(classes, per)},
+        "n_train": int(len(tr)),
+        "n_test": int(len(te)),
+        "y_true": y_true,
+        "y_pred": y_pred,
+        "clf": clf,
+    }
+
+
 def plot_confusion(y_true, y_pred, *, class_names=None, normalize="true",
                    cmap="Blues", figsize=None, title="Confusion matrix"):
     """Confusion-matrix heatmap (rows = ground truth, cols = prediction).
