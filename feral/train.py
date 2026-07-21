@@ -174,7 +174,7 @@ def main(cfg):
         logger.info("Extracting embeddings for the inference split...")
         emb, ids = extract_embeddings(
             best_model, inference_loader, device=device,
-            pool=cfg['data'].get('embedding_pool', 'mean'),
+            pool=cfg['data'].get('embedding_pool', 'attn'),
             max_batches=cfg.get('max_batches'),
         )
         out_pth = os.path.join(resolve_output_dir(cfg, "embeddings"),

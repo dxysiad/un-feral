@@ -35,8 +35,9 @@ def train_contrastive_epoch(model, loader, optimizer, scheduler, *, device,
     """Run one epoch of self-supervised contrastive training. Returns avg_loss.
 
     The loader yields {vid1, vid2, vid3} triplet batches; the loss is the
-    per-frame triplet loss from ``feral.contrastive`` (no criterion/metrics), and
-    only the encoder (unfrozen backbone + clip_projector) receives gradients.
+    per-chunk triplet loss from ``feral.contrastive`` (no criterion/metrics), and
+    only the encoder (unfrozen backbone + clip_projector + mlp + chunk_pooler)
+    receives gradients.
     """
     from feral.contrastive import contrastive_step
     model.train()
@@ -88,7 +89,7 @@ def evaluate_contrastive(model, loader, *, device, margin=1.0, normalize=True,
     """Average held-out triplet loss over a contrastive loader (val/test).
 
     The unsupervised analogue of the old classification ``evaluate``: no labels,
-    no metrics — just the mean per-frame triplet loss with grads disabled.
+    no metrics — just the mean per-chunk triplet loss with grads disabled.
     Returns avg_loss (0.0 for an empty loader).
     """
     from feral.contrastive import contrastive_step

@@ -101,15 +101,27 @@ def load_model_from_checkpoint(cfg, device, checkpoint_path):
                if k in model_sd and v.shape == model_sd[k].shape}
     missing = [k for k in model_sd if k not in matched]
     ignored = [k for k in state_dict if k not in matched]
-    if missing:
+    # Checkpoints predating the chunk head (mlp + chunk_pooler) still cover the
+    # backbone and frame pooler; let those load with the new head at init.
+    chunk_head_missing = [k for k in missing if k.startswith(('mlp.', 'chunk_pooler.'))]
+    encoder_missing = [k for k in missing if k not in chunk_head_missing]
+    if encoder_missing:
         logging.error(
             "Checkpoint '%s' is missing weights for %d encoder tensors (e.g. %s). "
             "This usually means it was saved from a different backbone/model.",
-            checkpoint_path, len(missing), missing[:6],
+            checkpoint_path, len(encoder_missing), encoder_missing[:6],
         )
         raise RuntimeError(
             f"Checkpoint '{checkpoint_path}' does not cover the encoder: "
-            f"{len(missing)} tensors missing."
+            f"{len(encoder_missing)} tensors missing."
+        )
+    if chunk_head_missing:
+        logging.warning(
+            "Checkpoint '%s' predates the chunk head: %d tensors (mlp/chunk_pooler) are "
+            "left RANDOMLY INITIALIZED. Per-chunk embeddings from this model are "
+            "meaningless until it is retrained; use embedding_pool='mean' for the "
+            "legacy per-frame representation.",
+            checkpoint_path, len(chunk_head_missing),
         )
     model.load_state_dict(matched, strict=False)
     if ignored:

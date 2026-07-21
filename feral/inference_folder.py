@@ -111,7 +111,7 @@ def run_inference_folder(checkpoint_path, video_folder, output=None,
     emb, ids = extract_embeddings_folder(
         model, cfg, video_folder,
         batch_size=batch_size, num_workers=num_workers,
-        pool=cfg['data'].get('embedding_pool', 'mean'),
+        pool=cfg['data'].get('embedding_pool', 'attn'),
         save_path=output,
     )
     logger.info("Saved %d embeddings (dim %s) to %s", emb.shape[0], tuple(emb.shape[1:]), output)

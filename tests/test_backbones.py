@@ -77,8 +77,10 @@ def cuda_cleanup():
 @pytest.mark.parametrize("backbone_key", sorted(BACKBONES))
 def test_backbone_forward(backbone_key, train_batches, cuda_cleanup):
     """Build FeralModel with `backbone_key`, run a forward pass on a real batch,
-    check the per-frame feature shape is (B, predict_per_item, D)."""
+    check the per-chunk feature shape is (B, embed_dim) and the per-frame tap is
+    (B, predict_per_item, D)."""
     entry = BACKBONES[backbone_key]
+    embed_dim = 64
     x_cpu, predict_per_item = train_batches[entry['img_size']]
 
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -89,16 +91,22 @@ def test_backbone_forward(backbone_key, train_batches, cuda_cleanup):
         model = FeralModel(
             backbone=backbone_key,
             predict_per_item=predict_per_item,
+            embed_dim=embed_dim,
             freeze_encoder_layers=0,
             pretrained=False,
         )
     model.eval()
     with torch.no_grad():
-        out = model(x_cpu.to(device))
+        x = x_cpu.to(device)
+        out = model(x)
+        frames = model.forward_frames(x)
 
     B = x_cpu.shape[0]
-    assert out.shape[:2] == (B, predict_per_item), (
-        f"{backbone_key}: expected leading dims {(B, predict_per_item)}, "
+    assert out.shape == (B, embed_dim), (
+        f"{backbone_key}: expected per-chunk shape {(B, embed_dim)}, "
         f"got {tuple(out.shape)}"
     )
-    assert out.shape[2] == model.backbone.hidden_dim
+    assert frames.shape == (B, predict_per_item, model.backbone.hidden_dim), (
+        f"{backbone_key}: expected per-frame shape "
+        f"{(B, predict_per_item, model.backbone.hidden_dim)}, got {tuple(frames.shape)}"
+    )

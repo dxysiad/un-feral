@@ -1,9 +1,10 @@
 """Extract per-clip embeddings from a FeralModel over a folder of videos.
 
-Embedding extraction is inference that taps ``FeralModel.forward_features``
-instead of the classification head, so it reuses the folder-inference machinery
-(chunk enumeration, collation) from ``inference_folder`` / ``dataset``. The
-result is one feature vector per chunk, suitable for dimensionality reduction
+Embedding extraction is inference that taps ``FeralModel.forward_features`` (the
+trained per-chunk vector) or ``forward_frames`` (the per-frame tap), so it reuses
+the folder-inference machinery (chunk enumeration, collation) from
+``inference_folder`` / ``dataset``. The default result is one feature vector per
+chunk — the same vector the triplet loss trains — suitable for dimensionality reduction
 (UMAP / t-SNE / PCA) and downstream unsupervised behavior analysis.
 
 Works on any FeralModel — a pretrained backbone built via ``build_model`` or a
@@ -19,20 +20,31 @@ from feral.inference_folder import find_videos, build_inference_labels_json
 
 
 @torch.no_grad()
-def extract_embeddings(model, loader, device, pool="mean", max_batches=None):
-    """Tap ``model.forward_features`` over an unlabeled ``(data, names)`` loader.
+def extract_embeddings(model, loader, device, pool="attn", max_batches=None):
+    """Tap the model's feature outputs over an unlabeled ``(data, names)`` loader.
 
     Returns ``(emb, ids)``:
-      emb : (N, D) float tensor with ``pool='mean'`` (mean over the per-frame
-            feature vectors -> one vector per chunk); (N, T, D) with ``pool='none'``.
+      emb : (N, embed_dim) with ``pool='attn'`` — the model's trained per-chunk
+            vector from ``forward_features``;
+            (N, D) with ``pool='mean'`` — legacy unweighted mean over the
+            per-frame vectors (``forward_frames``), reproduces pre-chunk-head runs;
+            (N, T, D) with ``pool='none'`` — the raw per-frame vectors.
       ids : list of ``(filename, start_frame_index)`` — one per chunk, in loader order.
+
+    ``model`` may be a ``torch.compile``d module: attribute lookup forwards to the
+    wrapped model, so the ``forward_frames`` tap works (eagerly) for the legacy modes.
     """
+    if pool not in ("attn", "mean", "none"):
+        raise ValueError(f"pool must be 'attn', 'mean' or 'none', got {pool!r}")
     model.eval()
     embs, ids = [], []
     for i, (data, names) in enumerate(tqdm(loader, total=len(loader))):
         data = data.to(device)
         with torch.amp.autocast(dtype=torch.bfloat16, device_type="cuda"):
-            feats = model.forward_features(data)      # (B, T, D)
+            if pool == "attn":
+                feats = model.forward_features(data)  # (B, embed_dim)
+            else:
+                feats = model.forward_frames(data)    # (B, T, D)
         if pool == "mean":
             feats = feats.mean(1)                     # (B, D)
         embs.append(feats.float().cpu())
@@ -44,7 +56,7 @@ def extract_embeddings(model, loader, device, pool="mean", max_batches=None):
 
 
 def extract_embeddings_folder(model, cfg, video_folder, *, batch_size=8,
-                              num_workers=4, pool="mean", save_path=None):
+                              num_workers=4, pool="attn", save_path=None):
     """Build an inference chunk-loader over ``video_folder`` and extract embeddings.
 
     Reuses the folder-inference machinery; class metadata is irrelevant for the

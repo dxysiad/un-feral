@@ -4,6 +4,9 @@ predict_per_item: 64
 output_dir: null  # root for results (checkpoints/, embeddings/, wandb/). null = current directory.
 dataset: null            # optional name nesting results one level deeper, e.g. checkpoints/<dataset>/
 model:
+  embed_dim: 256          # dimension of the per-chunk embedding produced by the MLP + chunk attention pooling
+  mlp_hidden_dim: null    # hidden width of the per-frame MLP (null = backbone hidden_dim)
+  chunk_pool_heads: 8     # attention heads in the chunk pooler; embed_dim must be divisible by this
   freeze_encoder_layers: 12
   gradient_checkpointing: false   # activation checkpointing: ~25-30% slower, big VRAM cut (fits ViT-L in ~9GB bs4). V-JEPA 2 / 2.1 only; errors on VideoPrism.
 data:
@@ -17,7 +20,7 @@ data:
   resize_to: 256
   resize_style: square
   do_aa: true
-  embedding_pool: mean     # how per-frame features are pooled into one vector per chunk at inference ('mean' or 'none')
+  embedding_pool: attn     # what `feral infer` saves: 'attn' = the model's trained per-chunk vector (B, embed_dim); 'mean' = legacy mean over per-frame features; 'none' = raw per-frame features
 training:
   epochs: 10               # number of contrastive training epochs
   train_bs: 4
