@@ -185,55 +185,7 @@ def clusters_as_classifier(labels, gt_labels):
     y_pred = np.array([mapping[int(c)] for c in labels])
     return y_pred, mapping
 
-
-def linear_probe(emb, gt_labels, *, groups=None, n_splits=5, seed=0,
-                 class_names=None):
-    """Cross-validated linear probe: how linearly decodable the labels are.
-
-    Standardize -> balanced logistic regression, scored out-of-fold. Pass
-    ``groups`` (e.g. the video id per chunk) to use GroupKFold so overlapping
-    chunks from the same video never straddle train/test — the honest setting
-    for temporally autocorrelated clips; otherwise stratified k-fold. Returns a
-    dict: balanced_accuracy, macro_f1, per_class_f1, and out-of-fold y_true/y_pred.
-    """
-    from sklearn.linear_model import LogisticRegression
-    from sklearn.preprocessing import StandardScaler
-    from sklearn.pipeline import make_pipeline
-    from sklearn.model_selection import GroupKFold, StratifiedKFold
-    from sklearn.metrics import balanced_accuracy_score, f1_score
-
-    X = _to_numpy(emb)
-    y = np.asarray([int(g) for g in gt_labels])
-    if groups is not None:
-        splits = GroupKFold(n_splits=n_splits).split(X, y, np.asarray(groups))
-    else:
-        splits = StratifiedKFold(n_splits=n_splits, shuffle=True,
-                                 random_state=seed).split(X, y)
-
-    y_true = np.full(len(y), -1)
-    y_pred = np.full(len(y), -1)
-    for tr, te in splits:
-        clf = make_pipeline(
-            StandardScaler(),
-            LogisticRegression(max_iter=2000, class_weight="balanced"),
-        )
-        clf.fit(X[tr], y[tr])
-        y_pred[te] = clf.predict(X[te])
-        y_true[te] = y[te]
-
-    classes = sorted(set(y.tolist()))
-    per = f1_score(y_true, y_pred, labels=classes, average=None, zero_division=0)
-    return {
-        "balanced_accuracy": float(balanced_accuracy_score(y_true, y_pred)),
-        "macro_f1": float(f1_score(y_true, y_pred, average="macro", zero_division=0)),
-        "per_class_f1": {(class_names.get(c, c) if class_names else c): float(f)
-                         for c, f in zip(classes, per)},
-        "y_true": y_true,
-        "y_pred": y_pred,
-    }
-
-
-def decode_behavior(emb, gt_labels, *, groups=None, test_size=0.25, seed=0,
+def linear_probe(emb, gt_labels, *, groups=None, test_size=0.25, seed=0,
                     class_names=None):
     """Logistic-regression decoder: hold out a split and score decoding accuracy.
 

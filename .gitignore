@@ -244,3 +244,7 @@ scratch_contrastive_prototype.py
 
 # claude
 .claude/
+
+# sweep
+sweep_train.py
+sweep.yaml
