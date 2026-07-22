@@ -1,8 +1,8 @@
 """Extract per-clip embeddings from a FeralModel over a folder of videos.
 
 Embedding extraction is inference that taps ``FeralModel.forward_features`` (the
-trained per-chunk vector) or ``forward_frames`` (the per-frame tap), so it reuses
-the folder-inference machinery (chunk enumeration, collation) from
+trained per-chunk vector) or ``forward_tokens`` (the raw backbone tokens), so it
+reuses the folder-inference machinery (chunk enumeration, collation) from
 ``inference_folder`` / ``dataset``. The default result is one feature vector per
 chunk — the same vector the triplet loss trains — suitable for dimensionality reduction
 (UMAP / t-SNE / PCA) and downstream unsupervised behavior analysis.
@@ -26,13 +26,14 @@ def extract_embeddings(model, loader, device, pool="attn", max_batches=None):
     Returns ``(emb, ids)``:
       emb : (N, embed_dim) with ``pool='attn'`` — the model's trained per-chunk
             vector from ``forward_features``;
-            (N, D) with ``pool='mean'`` — legacy unweighted mean over the
-            per-frame vectors (``forward_frames``), reproduces pre-chunk-head runs;
-            (N, T, D) with ``pool='none'`` — the raw per-frame vectors.
+            (N, d) with ``pool='mean'`` — an untrained baseline: the unweighted
+            mean over the backbone's spatiotemporal tokens. NOTE this is not the
+            old per-frame mean; the encoder no longer has a per-frame stage;
+            (N, num_tokens, d) with ``pool='none'`` — the raw backbone tokens.
       ids : list of ``(filename, start_frame_index)`` — one per chunk, in loader order.
 
     ``model`` may be a ``torch.compile``d module: attribute lookup forwards to the
-    wrapped model, so the ``forward_frames`` tap works (eagerly) for the legacy modes.
+    wrapped model, so the ``forward_tokens`` tap works (eagerly) for the raw modes.
     """
     if pool not in ("attn", "mean", "none"):
         raise ValueError(f"pool must be 'attn', 'mean' or 'none', got {pool!r}")
@@ -44,9 +45,9 @@ def extract_embeddings(model, loader, device, pool="attn", max_batches=None):
             if pool == "attn":
                 feats = model.forward_features(data)  # (B, embed_dim)
             else:
-                feats = model.forward_frames(data)    # (B, T, D)
+                feats = model.forward_tokens(data)    # (B, num_tokens, d)
         if pool == "mean":
-            feats = feats.mean(1)                     # (B, D)
+            feats = feats.mean(1)                     # (B, d)
         embs.append(feats.float().cpu())
         # names[b] is the per-frame list; names[b][0] == (fn, start_frame, 0)
         ids.extend((n[0][0], int(n[0][1])) for n in names)

@@ -101,9 +101,11 @@ def load_model_from_checkpoint(cfg, device, checkpoint_path):
                if k in model_sd and v.shape == model_sd[k].shape}
     missing = [k for k in model_sd if k not in matched]
     ignored = [k for k in state_dict if k not in matched]
-    # Checkpoints predating the chunk head (mlp + chunk_pooler) still cover the
-    # backbone and frame pooler; let those load with the new head at init.
-    chunk_head_missing = [k for k in missing if k.startswith(('mlp.', 'chunk_pooler.'))]
+    # Checkpoints predating the chunk-level head still cover the backbone and the
+    # pooler's projections; only the MLP and the query token (which shrank from
+    # predict_per_item queries to one) fail to match. Let those load at init.
+    chunk_head_missing = [k for k in missing
+                          if k.startswith('mlp.') or k == 'clip_projector.x_q']
     encoder_missing = [k for k in missing if k not in chunk_head_missing]
     if encoder_missing:
         logging.error(
@@ -117,11 +119,10 @@ def load_model_from_checkpoint(cfg, device, checkpoint_path):
         )
     if chunk_head_missing:
         logging.warning(
-            "Checkpoint '%s' predates the chunk head: %d tensors (mlp/chunk_pooler) are "
-            "left RANDOMLY INITIALIZED. Per-chunk embeddings from this model are "
-            "meaningless until it is retrained; use embedding_pool='mean' for the "
-            "legacy per-frame representation.",
-            checkpoint_path, len(chunk_head_missing),
+            "Checkpoint '%s' predates the chunk-level head: %d tensors are left "
+            "RANDOMLY INITIALIZED (%s). Per-chunk embeddings from this model are "
+            "meaningless until it is retrained.",
+            checkpoint_path, len(chunk_head_missing), chunk_head_missing,
         )
     model.load_state_dict(matched, strict=False)
     if ignored:

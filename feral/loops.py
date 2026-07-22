@@ -36,8 +36,7 @@ def train_contrastive_epoch(model, loader, optimizer, scheduler, *, device,
 
     The loader yields {vid1, vid2, vid3} triplet batches; the loss is the
     per-chunk triplet loss from ``feral.contrastive`` (no criterion/metrics), and
-    only the encoder (unfrozen backbone + clip_projector + mlp + chunk_pooler)
-    receives gradients.
+    only the encoder (unfrozen backbone + clip_projector + mlp) receives gradients.
     """
     from feral.contrastive import contrastive_step
     model.train()
