@@ -118,6 +118,33 @@ def get_video_dims(path: str):
     finally:
         cap.release()
 
+
+def get_video_fps(path: str):
+    """Return the video's frame rate via OpenCV, or None if it can't be read."""
+    cap = cv2.VideoCapture(path)
+    try:
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        return fps if fps and fps > 0 else None
+    finally:
+        cap.release()
+
+
+def fps_decimation_factor(source_fps, target_fps):
+    """Frame-stride multiplier that subsamples ``source_fps`` down to ~``target_fps``.
+
+    Returns 1 when ``target_fps`` is None (no fps normalization) or when the
+    source rate is unknown/already at-or-below target. Chunks formed with this
+    factor cover the same real-time window regardless of the source frame rate.
+    We can only decimate, never interpolate, so the factor is clamped to >= 1
+    (a source slower than ``target_fps`` is used as-is).
+    """
+    if target_fps is None:
+        return 1
+    if source_fps is None or source_fps <= 0:
+        logger.warning("Unknown source fps; skipping fps normalization (factor=1)")
+        return 1
+    return max(1, round(source_fps / target_fps))
+
 class ClsDataset():
     """Label-free chunk enumerator over a set of videos (inference partition only).
 
@@ -127,7 +154,7 @@ class ClsDataset():
 
     def __init__(self, partition, label_json_dict, do_aa, predict_per_item,
                  num_classes, prefix, resize_to, chunk_shift, chunk_length,
-                 chunk_step, resize_style="square", **kwargs):
+                 chunk_step, resize_style="square", target_fps=None, **kwargs):
         """Build the chunk samples for the inference partition and set up transforms.
 
         ``label_json_dict`` only needs a ``splits`` dict listing filenames per
@@ -147,6 +174,7 @@ class ClsDataset():
 
         self.resize_to = resize_to
         self.resize_style = resize_style
+        self.target_fps = target_fps
         self.parse_json(chunk_shift, chunk_length, chunk_step)
         self.aug = None  # no augmentation at inference
 
@@ -168,7 +196,10 @@ class ClsDataset():
             if self.decode_size is None:
                 orig_w, orig_h = get_video_dims(pth)
                 self.decode_size = compute_decode_size(orig_w, orig_h, self.resize_to, self.resize_style)
-            frame_ids = get_frame_ids(video_total_frames, chunk_shift, chunk_length, chunk_step)
+            # Decimate to ~target_fps by widening the within/between-chunk strides
+            # (chunk_length is unchanged, so the model still sees that many frames).
+            d = fps_decimation_factor(get_video_fps(pth), self.target_fps)
+            frame_ids = get_frame_ids(video_total_frames, chunk_shift * d, chunk_length, chunk_step * d)
             for frames in frame_ids:
                 self.samples.append((fn, frames))
 
@@ -228,7 +259,7 @@ class ContrastiveVideoDataset():
 
     def __init__(self, video_paths, num_samples, chunk_length, chunk_step,
                  resize_to, resize_style="square", do_aa=True, prefix="",
-                 seed=None, vid2_max_shift=8, **kwargs):
+                 seed=None, vid2_max_shift=8, target_fps=None, **kwargs):
         self.prefix = prefix
         self.video_paths = list(video_paths)
         self.chunk_length = chunk_length
@@ -237,26 +268,31 @@ class ContrastiveVideoDataset():
         self.resize_style = resize_style
         self.num_samples = num_samples
         self.vid2_max_shift = vid2_max_shift
+        self.target_fps = target_fps
         self.rng = random.Random(seed)
 
         self.norm = torchvision.transforms.v2.Normalize(
             (0.485, 0.456, 0.406), (0.229, 0.224, 0.225))  # vjepa
         self.scale = 0.00392156862745098
 
-        # frames a chunk spans in real time (number of 'real' frames in a chunk): (L-1)*step + 1 
-        self.span = (chunk_length - 1) * chunk_step + 1
-
-        # Per-video frame counts + shared decode size (assumes uniform dims,
-        # same assumption ClsDataset makes).
+        # Per-video frame counts, fps-decimation factor + shared decode size
+        # (decode size assumes uniform dims, same assumption ClsDataset makes).
+        # With target_fps set, each video is subsampled to ~target_fps so a
+        # chunk covers the same real-time window regardless of source fps; the
+        # within-chunk stride (and thus real-time span) then varies per video.
+        self.fps_factor = {}
         self.frame_counts = {}
         self.decode_size = None
         self.usable_paths = []
         for fn in self.video_paths:
             pth = os.path.join(self.prefix, fn)
             total = get_frame_count(pth)
-            if total is None or total < self.span:
-                logger.warning("Skipping %s: %s frames, need >= %d", fn, total, self.span)
+            d = fps_decimation_factor(get_video_fps(pth), self.target_fps)
+            span = (chunk_length - 1) * chunk_step * d + 1
+            if total is None or total < span:
+                logger.warning("Skipping %s: %s frames, need >= %d", fn, total, span)
                 continue
+            self.fps_factor[fn] = d
             self.frame_counts[fn] = total
             self.usable_paths.append(fn)
             if self.decode_size is None:
@@ -272,19 +308,27 @@ class ContrastiveVideoDataset():
 
         self.resample()
 
+    def _step_span(self, fn):
+        """Per-video (within-chunk stride, real frames spanned) after fps decimation."""
+        step = self.chunk_step * self.fps_factor[fn]
+        span = (self.chunk_length - 1) * step + 1
+        return step, span
+
     def _random_chunk(self):
         """Pick a random (filename, frame_indices) chunk at a random start."""
         fn = self.rng.choice(self.usable_paths)
-        start = self.rng.randint(0, self.frame_counts[fn] - self.span)
-        frames = list(range(start, start + self.span, self.chunk_step))
+        step, span = self._step_span(fn)
+        start = self.rng.randint(0, self.frame_counts[fn] - span)
+        frames = list(range(start, start + span, step))
         return fn, frames
 
     def _chunk_with_offset(self, fn, start, offset):
         """Return a chunk starting at start + offset"""
+        step, span = self._step_span(fn)
         new_start = start + offset
-        max_start = self.frame_counts[fn] - self.span
+        max_start = self.frame_counts[fn] - span
         new_start = max(0, min(new_start, max_start))
-        frames = list(range(new_start, new_start + self.span, self.chunk_step))
+        frames = list(range(new_start, new_start + span, step))
         return fn, frames
     
     def _chunks_overlap(self, chunk_a, chunk_b):
@@ -302,12 +346,13 @@ class ContrastiveVideoDataset():
             primary = self._random_chunk()
 
             # precompute shifted chunk to check vid3 against both
+            fn, frames = primary
             prob = self.rng.random()
             if prob >= 0.5:
-                offset = self.rng.randint(-self.vid2_max_shift, self.vid2_max_shift)
+                # jitter is in target-fps frames -> scale to source frames
+                offset = self.rng.randint(-self.vid2_max_shift, self.vid2_max_shift) * self.fps_factor[fn]
             else:
                 offset = 0
-            fn, frames = primary
             shifted = self._chunk_with_offset(fn, frames[0], offset)
             
             # reject any vid3 that overlaps with either vid1 or vid2

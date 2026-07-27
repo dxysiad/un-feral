@@ -124,6 +124,7 @@ def build_datasets_and_loaders(cfg, splits):
                 chunk_shift=part_kwargs['chunk_shift'],
                 chunk_length=part_kwargs['chunk_length'],
                 chunk_step=part_kwargs['chunk_step'],
+                target_fps=part_kwargs.get('target_fps'),
             )
         else:
             dataset = ContrastiveVideoDataset(
@@ -137,6 +138,7 @@ def build_datasets_and_loaders(cfg, splits):
                 vid2_max_shift=part_kwargs.get('vid2_max_shift', 8),
                 prefix=part_kwargs['prefix'],
                 seed=cfg['seed'],
+                target_fps=part_kwargs.get('target_fps'),
             )
 
         loader = DataLoader(

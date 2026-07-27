@@ -222,10 +222,12 @@ checkpoints/# pixi environments
 !.pixi/config.toml
 
 # bash scripts
+bash/
 *.sh
 
 # config
-my_config.yaml
+config/
+*.yaml
 
 # results
 checkpoints/
@@ -247,4 +249,3 @@ scratch_contrastive_prototype.py
 
 # sweep
 sweep_train.py
-sweep.yaml

@@ -14,6 +14,7 @@ data:
   chunk_length: 64
   chunk_shift: 32
   chunk_step: 1
+  target_fps: null         # normalize sampling to ~this fps per video by widening chunk_step/chunk_shift by round(source_fps / target_fps) (>=1; decimate only, can't upsample). chunk_length is unchanged, so a chunk covers the same real-time window regardless of source frame rate. null = use raw frames (no fps normalization). Lets 30 Hz and 100 Hz videos train/infer together consistently.
   vid2_max_shift: 8        # vid2's start is jittered +/- this many frames from vid1's (50% of the time). Larger = the model must tolerate more temporal offset between positives; 0 = vid2 is the same frames as vid1.
   eval_chunk_shift: null   # stride between chunks for the inference partition only (null = reuse chunk_shift). Lets embedding extraction run a denser overlap than training.
   resize_to: 256

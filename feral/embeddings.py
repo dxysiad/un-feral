@@ -71,7 +71,7 @@ def extract_embeddings_folder(model, cfg, video_folder, *, batch_size=8,
         predict_per_item=cfg['predict_per_item'], num_classes=1, prefix=video_folder,
         resize_to=cfg['data']['resize_to'], resize_style=cfg['data'].get('resize_style', 'square'),
         chunk_shift=cfg['data']['chunk_shift'], chunk_length=cfg['data']['chunk_length'],
-        chunk_step=cfg['data']['chunk_step'],
+        chunk_step=cfg['data']['chunk_step'], target_fps=cfg['data'].get('target_fps'),
     )
     loader = DataLoader(dataset, batch_size=batch_size, shuffle=False,
                         num_workers=num_workers, collate_fn=collate_fn_inference)
