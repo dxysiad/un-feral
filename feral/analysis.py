@@ -175,3 +175,5 @@ def plot_tpi(emb2d, keep, pairs, X_tsne):
         row = " ".join(f"{tpi_scores[n][i].mean():>14.3f} +-{tpi_scores[n][i].std():5.3f}"
                     for n in tpi_scores)
         print(f"{k:>5} {row}")
+
+    return fig, {"ks": KS, "scores": tpi_scores}

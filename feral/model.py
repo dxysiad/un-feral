@@ -51,7 +51,7 @@ class FeralModel(nn.Module):
     def __init__(self,
             backbone,
             predict_per_item=1,
-            embed_dim=256,
+            embed_dim=1024,
             mlp_hidden_dim=None,
             freeze_encoder_layers=0,
             pretrained=True,
@@ -63,9 +63,8 @@ class FeralModel(nn.Module):
         mlp_hidden_dim defaults to the backbone's hidden dim. Freezes the first
         freeze_encoder_layers backbone layers.
 
-        Extra kwargs (leftover config keys) are ignored — notably
-        ``predict_per_item``, which sized the old per-frame pooling and no longer
-        affects the encoder now that it emits one vector per chunk."""
+        predict_per_item now set to 1 by default
+        """
 
         super().__init__()
 

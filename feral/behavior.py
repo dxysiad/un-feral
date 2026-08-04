@@ -42,7 +42,7 @@ def cluster_embeddings(emb, *, cluster_dim=10, min_cluster_size=50,
 
 def plot_umap_clusters(emb2d, labels, *, cmap_name="tab20", figsize=(8, 7),
                        point_size=6, title="UMAP + HDBSCAN behavior clusters",
-                       label_names=None):
+                       label_names=None, xlabel="UMAP-1", ylabel="UMAP-2"):
     """Scatter the 2-D UMAP embedding colored by integer label.
 
     emb2d  : (N, 2) UMAP coords (the ``emb2d`` returned by ``cluster_embeddings``).
@@ -51,6 +51,7 @@ def plot_umap_clusters(emb2d, labels, *, cmap_name="tab20", figsize=(8, 7),
              ids here instead to color the same UMAP by ground truth.
     label_names : optional {id: name} to label the legend (e.g. behavior names);
                   ids without a name fall back to ``group {id}``. Returns a Figure.
+    xlabel/ylabel : axis names — override when the coords are not UMAP (e.g. t-SNE).
     """
     labels = np.asarray([int(l) for l in labels])
     emb2d = _to_numpy(emb2d)
@@ -73,8 +74,8 @@ def plot_umap_clusters(emb2d, labels, *, cmap_name="tab20", figsize=(8, 7),
                    color=base(j % base.N), linewidths=0, label=_name(c))
 
     n_groups = sum(1 for c in uniq if c != -1)
-    ax.set_xlabel("UMAP-1")
-    ax.set_ylabel("UMAP-2")
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
     ax.set_title(f"{title} ({n_groups} groups)")
     ax.set_xticks([])
     ax.set_yticks([])

@@ -18,8 +18,7 @@ def triplet_feature_loss(q_anchor, q_pos, q_neg, margin=1.0, normalize=True, hin
 
     q_*: (B, D) from ``FeralModel.forward_features`` — q1=anchor (vid1),
          q2=positive (vid2, same clip / different augmentation), q3=negative
-         (vid3, a different clip). The distances are taken over the last axis,
-         so per-frame (B, T, D) tensors still work (mean over frames as well).
+         (vid3, a different clip).
     normalize: L2-normalize each chunk vector first (bounds distances in
                [0, 4], avoids trivial scale collapse). Recommended.
     hinge:     relu+margin (stable, standard triplet). ``hinge=False, margin=0``

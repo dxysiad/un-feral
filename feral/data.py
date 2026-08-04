@@ -136,6 +136,7 @@ def build_datasets_and_loaders(cfg, splits):
                 resize_style=part_kwargs.get('resize_style', 'square'),
                 do_aa=part_kwargs.get('do_aa', True),
                 vid2_max_shift=part_kwargs.get('vid2_max_shift', 8),
+                neg_same_video_frac=part_kwargs.get('neg_same_video_frac', 0.0),
                 prefix=part_kwargs['prefix'],
                 seed=cfg['seed'],
                 target_fps=part_kwargs.get('target_fps'),

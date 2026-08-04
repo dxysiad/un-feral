@@ -53,7 +53,7 @@ def main(cfg):
     """Run the fully unsupervised contrastive training pipeline for one config.
 
     Builds the label-free splits, the headless encoder, and contrastive triplet
-    loaders, then trains the encoder with the per-frame triplet loss. Val/test
+    loaders, then trains the encoder with the per-chunk triplet loss. Val/test
     report held-out contrastive loss (no labels/metrics). The best encoder (lowest
     val loss) is checkpointed; if an inference split is present its per-chunk
     embeddings are extracted to an ``.npz``. Returns None.

@@ -248,8 +248,10 @@ class ContrastiveVideoDataset():
 
         - ``vid1`` and ``vid2``: two *independent* augmentations of the SAME
           chunk (same video, same frames -> a positive pair).
-        - ``vid3``: an augmentation of a DIFFERENT chunk, drawn from the same
-          or a different video (a contrastive / negative view).
+        - ``vid3``: an augmentation of a DIFFERENT, non-overlapping chunk (a
+          contrastive / negative view). It is drawn from the anchor's OWN video
+          with probability ``neg_same_video_frac`` (so background is constant
+          within the triplet and can't be a shortcut), otherwise from any video.
 
     Unlike ``ClsDataset`` there are no labels. ``__init__`` pre-generates a
     fixed list of ``num_samples`` (primary_chunk, other_chunk) pairs
@@ -259,7 +261,8 @@ class ContrastiveVideoDataset():
 
     def __init__(self, video_paths, num_samples, chunk_length, chunk_step,
                  resize_to, resize_style="square", do_aa=True, prefix="",
-                 seed=None, vid2_max_shift=8, target_fps=None, **kwargs):
+                 seed=None, vid2_max_shift=8, target_fps=None,
+                 neg_same_video_frac=0.0, **kwargs):
         self.prefix = prefix
         self.video_paths = list(video_paths)
         self.chunk_length = chunk_length
@@ -269,6 +272,7 @@ class ContrastiveVideoDataset():
         self.num_samples = num_samples
         self.vid2_max_shift = vid2_max_shift
         self.target_fps = target_fps
+        self.neg_same_video_frac = neg_same_video_frac
         self.rng = random.Random(seed)
 
         self.norm = torchvision.transforms.v2.Normalize(
@@ -314,13 +318,16 @@ class ContrastiveVideoDataset():
         span = (self.chunk_length - 1) * step + 1
         return step, span
 
-    def _random_chunk(self):
-        """Pick a random (filename, frame_indices) chunk at a random start."""
-        fn = self.rng.choice(self.usable_paths)
+    def _random_chunk_from(self, fn):
+        """Pick a random (filename, frame_indices) chunk at a random start within `fn`."""
         step, span = self._step_span(fn)
         start = self.rng.randint(0, self.frame_counts[fn] - span)
         frames = list(range(start, start + span, step))
         return fn, frames
+
+    def _random_chunk(self):
+        """Pick a random chunk from a randomly chosen video."""
+        return self._random_chunk_from(self.rng.choice(self.usable_paths))
 
     def _chunk_with_offset(self, fn, start, offset):
         """Return a chunk starting at start + offset"""
@@ -354,17 +361,30 @@ class ContrastiveVideoDataset():
             else:
                 offset = 0
             shifted = self._chunk_with_offset(fn, frames[0], offset)
-            
+
+            # Draw the negative from the SAME video as the anchor a fraction of the
+            # time. When it shares the anchor's background, "same environment?" can no
+            # longer separate positive from negative, so the model must key on
+            # motion/behavior instead -- this is what stops the embedding clustering
+            # by recording environment. The rest of the time keep the corpus-wide draw.
+            same_video = self.rng.random() < self.neg_same_video_frac
+            draw_neg = (lambda: self._random_chunk_from(fn)) if same_video else self._random_chunk
+
             # reject any vid3 that overlaps with either vid1 or vid2
-            other = self._random_chunk()
+            other = draw_neg()
             max_tries = 20
             for _ in range(max_tries):
                 if not self._chunks_overlap(other, primary) and not self._chunks_overlap(other, shifted):
                     break
-                other = self._random_chunk()
+                other = draw_neg()
             else:
-                logger.warning("Could not find non-overlapping vid3 after %d tries", max_tries)
-            
+                # A short anchor video may have no non-overlapping chunk; fall back to
+                # a corpus-wide draw rather than emit a degenerate (overlapping) negative.
+                if same_video:
+                    other = self._random_chunk()
+                else:
+                    logger.warning("Could not find non-overlapping vid3 after %d tries", max_tries)
+
             self.samples.append((primary, shifted, other))
 
     def _transform(self, video):
