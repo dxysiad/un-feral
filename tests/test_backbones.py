@@ -2,7 +2,7 @@
 
 Builds one real train batch per unique backbone `img_size` (from the synthetic
 video fixtures), then runs `FeralModel(backbone=..., pretrained=False)(batch)`
-for each registered key and asserts the per-frame feature shape.
+for each registered key and asserts the per-chunk feature shape.
 
 We use `pretrained=False` so this test is purely a wiring check — confirms the
 registry, adapter branching (HF vs torch.hub), hidden_dim plumbing, input
@@ -77,8 +77,8 @@ def cuda_cleanup():
 @pytest.mark.parametrize("backbone_key", sorted(BACKBONES))
 def test_backbone_forward(backbone_key, train_batches, cuda_cleanup):
     """Build FeralModel with `backbone_key`, run a forward pass on a real batch,
-    check the per-chunk feature shape is (B, embed_dim) and the raw token tap is
-    (B, num_tokens, hidden_dim)."""
+    check the per-chunk feature shape is (B, embed_dim) and that the adapter feeds
+    the head (B, num_tokens, hidden_dim)."""
     entry = BACKBONES[backbone_key]
     embed_dim = 64
     x_cpu, _predict_per_item = train_batches[entry['img_size']]  # unused: the encoder is chunk-level now
@@ -98,7 +98,7 @@ def test_backbone_forward(backbone_key, train_batches, cuda_cleanup):
     with torch.no_grad():
         x = x_cpu.to(device)
         out = model(x)
-        tokens = model.forward_tokens(x)
+        tokens = model.backbone(x)   # BackboneAdapter.forward -> (B, N, hidden_dim)
 
     B = x_cpu.shape[0]
     assert out.shape == (B, embed_dim), (
