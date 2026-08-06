@@ -81,7 +81,7 @@ If you don't want to run this in an interactive terminal, you can start training
 feral train-config path/to/config
 ```
 
-This requires a config in the same format as `default_config.yaml`. See `configs/` for examples.
+This requires a config in the same format as the packaged `feral/default_config.yaml`.
 
 ### 4. Inference
 
