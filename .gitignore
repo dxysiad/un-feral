@@ -249,6 +249,3 @@ scratch_contrastive_prototype.py
 
 # sweep
 sweep_train.py
-
-# downsampling
-downsampling.py
